@@ -1,0 +1,21 @@
+# Source files
+src/
+examples/
+coverage/
+tests/
+
+# Config files
+tsconfig*.json
+jest.config.js
+webpack.config.js
+.gitignore
+.npmignore
+
+# IDE files
+.vscode/
+.idea/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db 

@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+yarn-error.log
+
+# Build output
+dist/
+coverage/
+
+# IDE files
+.vscode/
+.idea/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
