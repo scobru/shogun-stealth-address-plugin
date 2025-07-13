@@ -10,7 +10,6 @@ import {
   StealthKeys,
   FluidkeySignature
 } from "./types";
-
 // Import Fluidkey Stealth Account Kit functions
 import { 
   generateKeysFromSignature,
@@ -20,6 +19,17 @@ import {
   generateStealthPrivateKey,
 } from "@fluidkey/stealth-account-kit";
 import { HDKey } from '@scure/bip32';
+
+// Utility di normalizzazione hex
+export function normalizeHex(str: string, length?: number): string {
+  if (!str) return '';
+  let s = str.toLowerCase();
+  if (!s.startsWith('0x')) s = '0x' + s;
+  if (length && s.length !== 2 + length * 2) {
+    s = '0x' + s.slice(2).padStart(length * 2, '0').slice(0, length * 2);
+  }
+  return s;
+}
 
 export class Stealth {
   private logLevel: LogLevel = "info";
@@ -211,7 +221,8 @@ export class Stealth {
     viewingPublicKey: string,
     spendingPublicKey: string,
     ephemeralPrivateKey?: string,
-    spendingPrivateKey?: string
+    viewingPrivateKey?: string,
+    derivationIndex?: number
   ): Promise<StealthAddressResult> {
     try {
       this.log("info", "Generating stealth address using Fluidkey method");
@@ -223,19 +234,32 @@ export class Stealth {
       // Generate ephemeral private key if not provided
       let ephemeralKey = ephemeralPrivateKey;
       if (!ephemeralKey) {
-        // Assicura che viewingPrivateKey sia una stringa esadecimale senza 0x
-        const cleanKey = viewingPublicKey.startsWith('0x')
-          ? viewingPublicKey.slice(2)
-          : viewingPublicKey;
-        const hdKey = HDKey.fromMasterSeed(Buffer.from(cleanKey, 'hex'));
-        const result = generateEphemeralPrivateKey({
-          viewingPrivateKeyNode: hdKey,
-          nonce: 0n,
-          chainId: 1,
-          coinType: 60
-        });
-        ephemeralKey = result.ephemeralPrivateKey;
+        if (viewingPrivateKey) {
+          const cleanPriv = viewingPrivateKey.startsWith('0x')
+            ? viewingPrivateKey.slice(2)
+            : viewingPrivateKey;
+          const hdKey = HDKey.fromMasterSeed(Buffer.from(cleanPriv, 'hex'));
+          const result = generateEphemeralPrivateKey({
+            viewingPrivateKeyNode: hdKey,
+            nonce: 0n,
+            chainId: 1,
+            coinType: 60
+          });
+          ephemeralKey = result.ephemeralPrivateKey;
+        } else {
+          // fallback: random ephemeral key
+          const ephemeralWallet = ethers.Wallet.createRandom();
+          ephemeralKey = ephemeralWallet.privateKey;
+        }
       }
+
+      this.log("debug", "[GEN] Params", {
+        viewingPublicKey: normalizeHex(viewingPublicKey, 64),
+        spendingPublicKey: normalizeHex(spendingPublicKey, 64),
+        ephemeralPrivateKey: ephemeralPrivateKey ? normalizeHex(ephemeralPrivateKey, 32) : undefined,
+        viewingPrivateKey: viewingPrivateKey ? normalizeHex(viewingPrivateKey, 32) : undefined,
+        derivationIndex,
+      });
 
       // Use Fluidkey's generateStealthAddresses function
       const result = generateStealthAddresses({
@@ -246,6 +270,11 @@ export class Stealth {
       const stealthAddress = result.stealthAddresses[0];
       const ephemeralWallet = new ethers.Wallet(ephemeralKey as `0x${string}`);
       
+      this.log("debug", "[GEN] Result", {
+        stealthAddress,
+        ephemeralPublicKey: normalizeHex(ephemeralWallet.signingKey.publicKey, 65),
+      });
+
       this.log("info", "Stealth address generated successfully using Fluidkey", {
         stealthAddress,
         ephemeralPublicKey: ephemeralWallet.signingKey.publicKey
@@ -381,6 +410,13 @@ export class Stealth {
 
       this.log("info", "Opening stealth address using Fluidkey method");
       
+      this.log("debug", "[OPEN] Params", {
+        stealthAddress: normalizeHex(stealthAddress, 20),
+        ephemeralPublicKey: normalizeHex(ephemeralPublicKey, 65),
+        viewingPrivateKey: normalizeHex(viewingPrivateKey, 32),
+        spendingPrivateKey: normalizeHex(spendingPrivateKey, 32),
+      });
+
       // Try using Fluidkey's generateStealthPrivateKey function
       try {
         const result = generateStealthPrivateKey({

@@ -17,6 +17,8 @@ import {
   generateStealthPrivateKey
 } from '@fluidkey/stealth-account-kit';
 
+import { normalizeHex } from "./stealth";
+
 /**
  * Plugin per la gestione delle funzionalità Stealth in ShogunCore
  * Enhanced with Fluidkey Stealth Account Kit integration
@@ -200,12 +202,20 @@ export class StealthPlugin
    */
   async generateStealthAddress(
     recipientViewingKey: string,
-    recipientSpendingKey: string
+    recipientSpendingKey: string,
+    ephemeralPrivateKey?: string
   ): Promise<StealthAddressResult> {
     try {
+      // Passa sempre la ephemeralPrivateKey se fornita
+      this.log("debug", "[PLUGIN][GEN] Params", {
+        recipientViewingKey: normalizeHex(recipientViewingKey, 64),
+        recipientSpendingKey: normalizeHex(recipientSpendingKey, 64),
+        ephemeralPrivateKey: ephemeralPrivateKey ? normalizeHex(ephemeralPrivateKey, 32) : undefined,
+      });
       return await this.stealth.generateStealthAddress(
         recipientViewingKey,
-        recipientSpendingKey
+        recipientSpendingKey,
+        ephemeralPrivateKey
       );
     } catch (error) {
       console.error("Error generating stealth address:", error);
@@ -267,6 +277,12 @@ export class StealthPlugin
     if (!ephemeralPublicKey) {
       throw new Error("Missing ephemeral public key");
     }
+    this.log("debug", "[PLUGIN][OPEN] Params", {
+      stealthAddress: normalizeHex(stealthAddress, 20),
+      ephemeralPublicKey: normalizeHex(ephemeralPublicKey, 65),
+      viewingPrivateKey: normalizeHex(viewingPrivateKey, 32),
+      spendingPrivateKey: normalizeHex(spendingPrivateKey, 32),
+    });
     return await this.stealth.openStealthAddress(
       stealthAddress,
       ephemeralPublicKey,
