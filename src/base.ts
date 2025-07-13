@@ -1,7 +1,19 @@
 /**
+ * Base interface for Shogun plugins
+ */
+export interface BasePluginInterface {
+  name: string;
+  version: string;
+  description: string;
+  initialize(core: any): void;
+  destroy(): void;
+  isInitialized(): boolean;
+}
+
+/**
  * Base class for Shogun plugins
  */
-export abstract class BasePlugin {
+export abstract class BasePlugin implements BasePluginInterface {
   protected core: any = null;
   protected initialized = false;
 

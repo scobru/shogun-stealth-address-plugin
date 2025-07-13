@@ -2,7 +2,8 @@
  * Manages stealth logic using Gun and SEA
  */
 import { ethers } from "ethers";
-import SEA from "gun/sea";
+import "gun/sea";
+const SEA = (typeof window !== "undefined" ? window.SEA : global.SEA);
 class Stealth {
     constructor(gun) {
         this.logs = [];

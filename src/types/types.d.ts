@@ -53,41 +53,58 @@ export interface StealthPluginInterface {
         publicKey: string;
     }>;
     /**
-     * Genera un indirizzo stealth utilizzando una chiave pubblica
-     * @param publicKey Chiave pubblica del destinatario
-     * @param ephemeralPrivateKey Chiave privata effimera per la generazione
+     * Genera un indirizzo stealth utilizzando chiavi separate per viewing e spending
+     * @param viewingPublicKey Chiave pubblica per scansionare transazioni
+     * @param spendingPublicKey Chiave pubblica per spendere fondi
+     * @param ephemeralPrivateKey Chiave privata effimera per la generazione (opzionale)
      * @returns Promise con il risultato dell'indirizzo stealth
      */
-    generateStealthAddress(publicKey: string, ephemeralPrivateKey: string): Promise<StealthAddressResult>;
+    generateStealthAddress(
+        viewingPublicKey: string,
+        spendingPublicKey: string,
+        ephemeralPrivateKey?: string,
+    ): Promise<StealthAddressResult>;
     /**
      * Scandisce gli indirizzi stealth per verificare se sono indirizzati all'utente
      * @param addresses Array di dati stealth da scansionare
-     * @param privateKeyOrSpendKey Chiave privata o chiave di spesa dell'utente
+     * @param viewingPrivateKey Chiave privata di viewing dell'utente
      * @returns Promise con gli indirizzi che appartengono all'utente
      */
-    scanStealthAddresses(addresses: StealthData[], privateKeyOrSpendKey: string): Promise<StealthData[]>;
+    scanStealthAddresses(addresses: StealthData[], viewingPrivateKey: string): Promise<StealthData[]>;
     /**
      * Verifica la proprietà di un indirizzo stealth
      * @param stealthData Dati dell'indirizzo stealth
-     * @param privateKeyOrSpendKey Chiave privata o chiave di spesa dell'utente
+     * @param viewingPrivateKey Chiave privata di viewing dell'utente
      * @returns Promise che indica se l'indirizzo appartiene all'utente
      */
-    isStealthAddressMine(stealthData: StealthData, privateKeyOrSpendKey: string): Promise<boolean>;
+    isStealthAddressMine(stealthData: StealthData, viewingPrivateKey: string): Promise<boolean>;
     /**
      * Recupera la chiave privata di un indirizzo stealth
      * @param stealthData Dati dell'indirizzo stealth
-     * @param privateKeyOrSpendKey Chiave privata o chiave di spesa dell'utente
+     * @param viewingPrivateKey Chiave privata di viewing dell'utente
      * @returns Promise con la chiave privata recuperata
      */
-    getStealthPrivateKey(stealthData: StealthData, privateKeyOrSpendKey: string): Promise<string>;
+    getStealthPrivateKey(stealthData: StealthData, viewingPrivateKey: string): Promise<string>;
     /**
-     * Apre un indirizzo stealth utilizzando la chiave pubblica effimera e le chiavi dell'utente
+     * Apre un indirizzo stealth derivando la chiave privata
      * @param stealthAddress Indirizzo stealth da aprire
-     * @param encryptedRandomNumber Numero casuale crittografato
-     * @param ephemeralPublicKey Chiave pubblica effimera utilizzata per generare l'indirizzo
-     * @param spendingKeyPair Coppia di chiavi di spesa dell'utente
-     * @param viewingKeyPair Coppia di chiavi di visualizzazione dell'utente
-     * @returns Promise con il wallet dell'indirizzo stealth
+     * @param ephemeralPublicKey Chiave pubblica effimera
+     * @param viewingPrivateKey Chiave privata di viewing dell'utente
+     * @param spendingPrivateKey Chiave privata di spending dell'utente
+     * @returns Promise con il wallet
      */
-    openStealthAddress(stealthAddress: string, encryptedRandomNumber: string, ephemeralPublicKey: string, spendingKeyPair: EphemeralKeyPair, viewingKeyPair: EphemeralKeyPair): Promise<ethers.Wallet>;
+    openStealthAddress(
+        stealthAddress: string,
+        ephemeralPublicKey: string,
+        viewingPrivateKey: string,
+        spendingPrivateKey: string,
+    ): Promise<ethers.Wallet>;
+    /**
+     * Ottiene le chiavi stealth dell'utente
+     * @returns Promise con le chiavi stealth
+     */
+    getStealthKeys(): Promise<{
+        spendingKey: string;
+        viewingKey: string;
+    }>;
 }

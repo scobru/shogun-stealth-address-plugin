@@ -1,7 +1,13 @@
-import { ethers } from "ethers";
+import { BasePluginInterface } from "./base";
+import { Wallet } from "ethers";
 
 /**
- * Interface for ephemeral key pairs used in stealth transactions
+ * Types and interfaces for Shogun Stealth Address functionality
+ * Now compatible with Fluidkey Stealth Account Kit
+ */
+
+/**
+ * Fluidkey compatible key pair interface
  */
 export interface EphemeralKeyPair {
   pub: string;
@@ -11,24 +17,47 @@ export interface EphemeralKeyPair {
 }
 
 /**
- * Interface for stealth transaction data
+ * Enhanced StealthKeys interface compatible with Fluidkey
  */
-export interface StealthData {
-  recipientPublicKey: string;
-  ephemeralKeyPair: EphemeralKeyPair;
-  timestamp: number;
-  encryptedRandomNumber?: string;
-  stealthAddress: string;
+export interface StealthKeys {
+  viewingKey: {
+    publicKey: string;
+    privateKey: string;
+  };
+  spendingKey: {
+    publicKey: string;
+    privateKey: string;
+  };
 }
 
 /**
- * Interface for stealth address generation result
+ * Fluidkey compatible stealth data structure
+ */
+export interface StealthData {
+  stealthAddress: string;
+  ephemeralPublicKey: string;
+  recipientViewingKey: string;
+  recipientSpendingKey: string;
+  ephemeralKeyPair?: EphemeralKeyPair;
+}
+
+/**
+ * Enhanced result interface compatible with Fluidkey
  */
 export interface StealthAddressResult {
   stealthAddress: string;
   ephemeralPublicKey: string;
-  encryptedRandomNumber: string;
-  recipientPublicKey: string;
+  recipientViewingPublicKey?: string;
+  recipientSpendingPublicKey?: string;
+}
+
+/**
+ * Fluidkey signature-based key generation
+ */
+export interface FluidkeySignature {
+  r: string;
+  s: string;
+  v: number;
 }
 
 /**
@@ -47,76 +76,60 @@ export interface LogMessage {
 }
 
 /**
- * Interfaccia per il plugin Stealth
+ * Enhanced plugin interface with Fluidkey functions
  */
-export interface StealthPluginInterface {
+export interface StealthPluginInterface extends BasePluginInterface {
   /**
-   * Genera una coppia di chiavi effimere per comunicazioni stealth
-   * @returns Promise con la coppia di chiavi generata
+   * Get or generate stealth keys for the current user
+   * @returns Promise<StealthKeys>
    */
-  generateEphemeralKeyPair(): Promise<{
-    privateKey: string;
-    publicKey: string;
-  }>;
+  getUserStealthKeys(): Promise<StealthKeys>;
 
   /**
-   * Genera un indirizzo stealth utilizzando una chiave pubblica
-   * @param publicKey Chiave pubblica del destinatario
-   * @param ephemeralPrivateKey Chiave privata effimera per la generazione
-   * @returns Promise con il risultato dell'indirizzo stealth
+   * Get public stealth keys for a given Gun public key
+   * @param gunPublicKey The Gun public key to look up
+   * @returns Promise<{viewingKey: string, spendingKey: string} | null>
+   */
+  getPublicStealthKeys(gunPublicKey: string): Promise<{viewingKey: string, spendingKey: string} | null>;
+
+  /**
+   * Generate a new stealth address for a recipient
+   * @param recipientViewingKey Recipient's viewing public key
+   * @param recipientSpendingKey Recipient's spending public key
+   * @returns Promise<StealthAddressResult>
    */
   generateStealthAddress(
-    publicKey: string,
-    ephemeralPrivateKey: string,
+    recipientViewingKey: string,
+    recipientSpendingKey: string
   ): Promise<StealthAddressResult>;
 
   /**
-   * Scandisce gli indirizzi stealth per verificare se sono indirizzati all'utente
-   * @param addresses Array di dati stealth da scansionare
-   * @param privateKeyOrSpendKey Chiave privata o chiave di spesa dell'utente
-   * @returns Promise con gli indirizzi che appartengono all'utente
-   */
-  scanStealthAddresses(
-    addresses: StealthData[],
-    privateKeyOrSpendKey: string,
-  ): Promise<StealthData[]>;
-
-  /**
-   * Verifica la proprietà di un indirizzo stealth
-   * @param stealthData Dati dell'indirizzo stealth
-   * @param privateKeyOrSpendKey Chiave privata o chiave di spesa dell'utente
-   * @returns Promise che indica se l'indirizzo appartiene all'utente
-   */
-  isStealthAddressMine(
-    stealthData: StealthData,
-    privateKeyOrSpendKey: string,
-  ): Promise<boolean>;
-
-  /**
-   * Recupera la chiave privata di un indirizzo stealth
-   * @param stealthData Dati dell'indirizzo stealth
-   * @param privateKeyOrSpendKey Chiave privata o chiave di spesa dell'utente
-   * @returns Promise con la chiave privata recuperata
-   */
-  getStealthPrivateKey(
-    stealthData: StealthData,
-    privateKeyOrSpendKey: string,
-  ): Promise<string>;
-
-  /**
-   * Apre un indirizzo stealth utilizzando la chiave pubblica effimera e le chiavi dell'utente
-   * @param stealthAddress Indirizzo stealth da aprire
-   * @param encryptedRandomNumber Numero casuale crittografato
-   * @param ephemeralPublicKey Chiave pubblica effimera utilizzata per generare l'indirizzo
-   * @param spendingKeyPair Coppia di chiavi di spesa dell'utente
-   * @param viewingKeyPair Coppia di chiavi di visualizzazione dell'utente
-   * @returns Promise con il wallet dell'indirizzo stealth
+   * Open a stealth address using the recipient's private keys
+   * @param stealthAddress The stealth address to open
+   * @param ephemeralPublicKey The ephemeral public key used to generate the stealth address
+   * @param viewingPrivateKey Recipient's viewing private key
+   * @param spendingPrivateKey Recipient's spending private key
+   * @returns Promise<Wallet>
    */
   openStealthAddress(
     stealthAddress: string,
-    encryptedRandomNumber: string,
     ephemeralPublicKey: string,
-    spendingKeyPair: EphemeralKeyPair,
-    viewingKeyPair: EphemeralKeyPair,
-  ): Promise<ethers.Wallet>;
+    viewingPrivateKey: string,
+    spendingPrivateKey: string
+  ): Promise<Wallet>;
+
+  /**
+   * Get a new pair of stealth keys
+   * @returns Promise<StealthKeys>
+   */
+  getStealthKeys(): Promise<StealthKeys>;
+}
+
+/**
+ * Interface for mapping Gun public keys to stealth keys
+ */
+export interface GunStealthKeyMapping {
+  viewingKey: string;
+  spendingKey: string;
+  timestamp: number;
 } 
