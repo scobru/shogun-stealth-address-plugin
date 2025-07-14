@@ -91,7 +91,7 @@ export class StealthPlugin
 
     // Save public keys in public space
     await new Promise<void>((resolve, reject) => {
-      this.core.gun.get('stealth_public_keys').get(userPub).put({
+      this.core.gun.get("shogun").get('stealth_public_keys').get(userPub).put({
         viewingKey: keys.viewingKey.publicKey,
         spendingKey: keys.spendingKey.publicKey,
         timestamp: Date.now()
@@ -122,7 +122,7 @@ export class StealthPlugin
 
     // Get public keys from public space
     const publicKeys = await new Promise<any>((resolve) => {
-      this.core.gun.get('stealth_public_keys').get(gunUser.is.pub).once(resolve);
+      this.core.gun.get("shogun").get('stealth_public_keys').get(gunUser.is.pub).once(resolve);
     });
 
     if (!publicKeys) return null;
@@ -149,7 +149,7 @@ export class StealthPlugin
     if (!this.core.gun) throw new Error("Gun not available");
 
     const publicKeys = await new Promise<any>((resolve) => {
-      this.core.gun.get('stealth_public_keys').get(gunPublicKey).once(resolve);
+      this.core.gun.get("shogun").get('stealth_public_keys').get(gunPublicKey).once(resolve);
     });
 
     if (!publicKeys) return null;
@@ -279,7 +279,7 @@ export class StealthPlugin
     }
     this.log("debug", "[PLUGIN][OPEN] Params", {
       stealthAddress: normalizeHex(stealthAddress, 20),
-      ephemeralPublicKey: normalizeHex(ephemeralPublicKey, 65),
+      ephemeralPublicKey: normalizeHex(ephemeralPublicKey, 33), // Changed from 65 to 33
       viewingPrivateKey: normalizeHex(viewingPrivateKey, 32),
       spendingPrivateKey: normalizeHex(spendingPrivateKey, 32),
     });

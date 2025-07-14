@@ -2,6 +2,7 @@
  * Manages stealth logic using Gun, SEA and Fluidkey Stealth Account Kit
  */
 import { ethers } from "ethers";
+import { SigningKey } from "ethers";
 import { 
   EphemeralKeyPair, 
   StealthAddressResult, 
@@ -89,10 +90,9 @@ export class Stealth {
       
       // If it's an uncompressed key (130 chars), convert to compressed (66 chars)
       if (normalizedKey.length === 130) {
-        const wallet = new ethers.Wallet(ethers.hexlify(ethers.randomBytes(32)));
-        // Use the signing key to get the compressed public key format
-        const signingKey = new ethers.SigningKey('0x' + normalizedKey.slice(2, 66));
-        return signingKey.publicKey;
+        // Use ethers.SigningKey.computePublicKey to get the compressed form
+        // The `true` parameter ensures compressed format
+        return SigningKey.computePublicKey('0x' + normalizedKey, true);
       }
       
       // If it's already compressed, ensure it has the 0x prefix
@@ -272,7 +272,7 @@ export class Stealth {
       
       this.log("debug", "[GEN] Result", {
         stealthAddress,
-        ephemeralPublicKey: normalizeHex(ephemeralWallet.signingKey.publicKey, 65),
+        ephemeralPublicKey: normalizeHex(ephemeralWallet.signingKey.publicKey, 33), // Changed from 65 to 33
       });
 
       this.log("info", "Stealth address generated successfully using Fluidkey", {
@@ -412,15 +412,18 @@ export class Stealth {
       
       this.log("debug", "[OPEN] Params", {
         stealthAddress: normalizeHex(stealthAddress, 20),
-        ephemeralPublicKey: normalizeHex(ephemeralPublicKey, 65),
+        ephemeralPublicKey: normalizeHex(ephemeralPublicKey, 33),
         viewingPrivateKey: normalizeHex(viewingPrivateKey, 32),
         spendingPrivateKey: normalizeHex(spendingPrivateKey, 32),
       });
 
+      // Ensure ephemeralPublicKey is normalized to compressed format before passing to Fluidkey
+      const normalizedEphemeralPublicKey = this.normalizePublicKey(ephemeralPublicKey);
+
       // Try using Fluidkey's generateStealthPrivateKey function
       try {
         const result = generateStealthPrivateKey({
-          ephemeralPublicKey: ephemeralPublicKey as `0x${string}`,
+          ephemeralPublicKey: normalizedEphemeralPublicKey as `0x${string}`,
           spendingPrivateKey: spendingPrivateKey as `0x${string}`,
         });
 
