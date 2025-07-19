@@ -60,6 +60,7 @@ export class StealthPlugin
   private paymentCallbacks: ((payment: StealthPaymentNotification) => void)[] =
     [];
   private isListening = false;
+  private lastClearTimestamp: number = 0; // Traccia quando è stata fatta l'ultima eliminazione definitiva
 
   constructor(config?: Partial<ContractConfig>) {
     super();
@@ -69,38 +70,112 @@ export class StealthPlugin
 
   initialize(core: any): void {
     super.initialize(core);
+
+    this.log("info", "[initialize] Starting plugin initialization");
+    this.log("info", "[initialize] Core received:", {
+      hasGun: !!core.gun,
+      hasProvider: !!core.provider,
+      hasSigner: !!core.signer,
+      coreKeys: Object.keys(core),
+    });
+
+    // Se il plugin è già completamente inizializzato, non reinizializzare
+    if (this.isFullyInitialized()) {
+      this.log(
+        "info",
+        "[initialize] Plugin already fully initialized, skipping re-initialization"
+      );
+      return;
+    }
+
     this.gun = core.gun;
     this.provider = core.provider;
     this.signer = core.signer;
+
+    this.log("info", "[initialize] Properties set:", {
+      gun: !!this.gun,
+      provider: !!this.provider,
+      signer: !!this.signer,
+      core: !!this.core,
+    });
 
     if (!this.gun) {
       throw new Error("Gun instance is required");
     }
 
+    // Provider e signer sono opzionali durante l'inizializzazione iniziale
+    // Verranno impostati successivamente tramite registerStealthPlugin
     if (!this.provider) {
-      throw new Error("Provider is required");
+      this.log(
+        "warn",
+        "Provider not available during initialization - will be set later"
+      );
     }
 
     if (!this.signer) {
-      throw new Error("Signer is required");
+      this.log(
+        "warn",
+        "Signer not available during initialization - will be set later"
+      );
     }
 
     this.contractManager = new ContractManager();
 
-    // Initialize contracts if config is available
-    if (this.contractManager.getAvailableNetworks().length > 0) {
+    // Initialize contracts only if provider and signer are available
+    if (
+      this.provider &&
+      this.signer &&
+      this.contractManager.getAvailableNetworks().length > 0
+    ) {
       this.initializeContracts();
     }
 
-    // Load payment state and sync notifications
-    this.loadPaymentState().then(() => {
-      this.syncNotificationsWithState().then(() => {
-        // Start payment listener after sync
-        this.startPaymentListener();
+    // Load payment state and sync notifications only if we have the necessary components
+    if (this.gun) {
+      this.loadPaymentState().then(() => {
+        this.syncNotificationsWithState().then(() => {
+          // Start payment listener after sync
+          this.startPaymentListener();
+        });
       });
-    });
+    }
 
     this.log("info", "Stealth plugin initialized successfully");
+    this.log("info", "[initialize] Final state:", {
+      gun: !!this.gun,
+      provider: !!this.provider,
+      signer: !!this.signer,
+      core: !!this.core,
+      isFullyInitialized: this.isFullyInitialized(),
+    });
+  }
+
+  /**
+   * Set provider and signer after initialization
+   * This method is called by registerStealthPlugin
+   */
+  setProviderAndSigner(provider: ethers.Provider, signer: ethers.Signer): void {
+    this.log("info", "[setProviderAndSigner] Setting provider and signer");
+    this.log("info", "[setProviderAndSigner] Provider:", !!provider);
+    this.log("info", "[setProviderAndSigner] Signer:", !!signer);
+
+    this.provider = provider;
+    this.signer = signer;
+
+    this.log(
+      "info",
+      "[setProviderAndSigner] Provider and signer set successfully"
+    );
+    this.log(
+      "info",
+      "[setProviderAndSigner] Plugin fully initialized:",
+      this.isFullyInitialized()
+    );
+
+    // Initialize contracts now that we have provider and signer
+    if (this.contractManager.getAvailableNetworks().length > 0) {
+      this.initializeContracts();
+    }
   }
 
   /**
@@ -190,6 +265,47 @@ export class StealthPlugin
   }
 
   /**
+   * Check if the plugin is fully initialized with provider and signer
+   */
+  isFullyInitialized(): boolean {
+    return !!(this.gun && this.provider && this.signer && this.core);
+  }
+
+  /**
+   * Debug method to check internal state
+   */
+  debugState(): {
+    gun: boolean;
+    provider: boolean;
+    signer: boolean;
+    core: boolean;
+    initialized: boolean;
+    isFullyInitialized: boolean;
+  } {
+    return {
+      gun: !!this.gun,
+      provider: !!this.provider,
+      signer: !!this.signer,
+      core: !!this.core,
+      initialized: this.initialized,
+      isFullyInitialized: this.isFullyInitialized(),
+    };
+  }
+
+  /**
+   * Assert that the plugin is fully initialized with provider and signer
+   */
+  protected assertFullyInitialized(): void {
+    this.assertInitialized();
+    if (!this.provider) {
+      throw new Error("Provider not available");
+    }
+    if (!this.signer) {
+      throw new Error("Signer not available");
+    }
+  }
+
+  /**
    * Saves stealth keys to Gun user space
    * @param keys StealthKeys object containing the keys to save
    * @returns Promise<void>
@@ -203,8 +319,17 @@ export class StealthPlugin
 
     const userPub = gunUser.is.pub;
     this.log("info", `[saveKeysToGun] Saving keys for user: ${userPub}`);
+    this.log(
+      "info",
+      `[saveKeysToGun] Viewing key public: ${keys.viewingKey.publicKey.substring(0, 20)}...`
+    );
+    this.log(
+      "info",
+      `[saveKeysToGun] Spending key public: ${keys.spendingKey.publicKey.substring(0, 20)}...`
+    );
 
     // Save private keys in user space
+    this.log("info", "[saveKeysToGun] Saving private keys to user space");
     await new Promise<void>((resolve, reject) => {
       gunUser
         .get("shogun")
@@ -217,13 +342,26 @@ export class StealthPlugin
           },
           (ack: any) => {
             this.log("info", `[saveKeysToGun] Private keys save ack:`, ack);
-            if (ack.err) reject(new Error(ack.err));
-            else resolve();
+            if (ack.err) {
+              this.log(
+                "error",
+                `[saveKeysToGun] ❌ Error saving private keys:`,
+                ack.err
+              );
+              reject(new Error(ack.err));
+            } else {
+              this.log(
+                "info",
+                `[saveKeysToGun] ✅ Private keys saved successfully`
+              );
+              resolve();
+            }
           }
         );
     });
 
     // Save public keys in public space
+    this.log("info", "[saveKeysToGun] Saving public keys to public space");
     await new Promise<void>((resolve, reject) => {
       this.core.gun
         .get("shogun")
@@ -237,11 +375,28 @@ export class StealthPlugin
           },
           (ack: any) => {
             this.log("info", `[saveKeysToGun] Public keys save ack:`, ack);
-            if (ack.err) reject(new Error(ack.err));
-            else resolve();
+            if (ack.err) {
+              this.log(
+                "error",
+                `[saveKeysToGun] ❌ Error saving public keys:`,
+                ack.err
+              );
+              reject(new Error(ack.err));
+            } else {
+              this.log(
+                "info",
+                `[saveKeysToGun] ✅ Public keys saved successfully`
+              );
+              resolve();
+            }
           }
         );
     });
+
+    this.log(
+      "info",
+      `[saveKeysToGun] ✅ All stealth keys saved successfully to GunDB`
+    );
   }
 
   /**
@@ -255,14 +410,35 @@ export class StealthPlugin
     const gunUser = this.core.gun.user();
     if (!gunUser.is) throw new Error("User not authenticated");
 
+    this.log(
+      "info",
+      `[getKeysFromGun] Retrieving keys for user: ${gunUser.is.pub}`
+    );
+
     // Get private keys from user space
+    this.log(
+      "info",
+      "[getKeysFromGun] Retrieving private keys from user space"
+    );
     const privateKeys = await new Promise<any>((resolve) => {
       gunUser.get("shogun").get("stealth_keys").once(resolve);
     });
 
-    if (!privateKeys) return null;
+    if (!privateKeys) {
+      this.log(
+        "info",
+        "[getKeysFromGun] ❌ No private keys found in user space"
+      );
+      return null;
+    }
+
+    this.log("info", "[getKeysFromGun] ✅ Private keys found in user space");
 
     // Get public keys from public space
+    this.log(
+      "info",
+      "[getKeysFromGun] Retrieving public keys from public space"
+    );
     const publicKeys = await new Promise<any>((resolve) => {
       this.core.gun
         .get("shogun")
@@ -271,7 +447,19 @@ export class StealthPlugin
         .once(resolve);
     });
 
-    if (!publicKeys) return null;
+    if (!publicKeys) {
+      this.log(
+        "info",
+        "[getKeysFromGun] ❌ No public keys found in public space"
+      );
+      return null;
+    }
+
+    this.log("info", "[getKeysFromGun] ✅ Public keys found in public space");
+    this.log(
+      "info",
+      "[getKeysFromGun] ✅ Successfully retrieved both private and public keys"
+    );
 
     return {
       viewingKey: {
@@ -343,21 +531,63 @@ export class StealthPlugin
     this.assertInitialized();
 
     try {
+      this.log("info", "[getUserStealthKeys] Starting stealth keys retrieval");
+
       // Try to get existing keys first
+      this.log(
+        "info",
+        "[getUserStealthKeys] Attempting to retrieve existing keys from GunDB"
+      );
       const existingKeys = await this.getKeysFromGun();
+
       if (existingKeys) {
-        this.log("info", "Retrieved existing stealth keys");
+        this.log(
+          "info",
+          "[getUserStealthKeys] ✅ Retrieved existing stealth keys from GunDB"
+        );
+        this.log(
+          "info",
+          "[getUserStealthKeys] Viewing key public:",
+          existingKeys.viewingKey.publicKey.substring(0, 20) + "..."
+        );
+        this.log(
+          "info",
+          "[getUserStealthKeys] Spending key public:",
+          existingKeys.spendingKey.publicKey.substring(0, 20) + "..."
+        );
         return existingKeys;
       }
 
       // If no keys exist, generate new ones
-      this.log("info", "No existing keys found, generating new ones");
+      this.log(
+        "info",
+        "[getUserStealthKeys] ⚠️ No existing keys found in GunDB, generating new ones"
+      );
       const newKeys = await this.stealth.getStealthKeys();
+      this.log("info", "[getUserStealthKeys] Generated new stealth keys");
+      this.log(
+        "info",
+        "[getUserStealthKeys] Viewing key public:",
+        newKeys.viewingKey.publicKey.substring(0, 20) + "..."
+      );
+      this.log(
+        "info",
+        "[getUserStealthKeys] Spending key public:",
+        newKeys.spendingKey.publicKey.substring(0, 20) + "..."
+      );
+
       await this.saveKeysToGun(newKeys);
-      this.log("info", "Generated and saved new stealth keys");
+      this.log(
+        "info",
+        "[getUserStealthKeys] ✅ Generated and saved new stealth keys to GunDB"
+      );
       return newKeys;
     } catch (error) {
-      this.log("error", "Error getting user stealth keys", error);
+      this.log(
+        "error",
+        "[getUserStealthKeys] ❌ Error getting user stealth keys",
+        error
+      );
       throw error;
     }
   }
@@ -378,7 +608,8 @@ export class StealthPlugin
   async generateStealthAddress(
     recipientViewingKey: string,
     recipientSpendingKey: string,
-    ephemeralPrivateKey?: string
+    ephemeralPrivateKey?: string,
+    spendingPrivateKey?: string
   ): Promise<StealthAddressResult> {
     try {
       // Passa sempre la ephemeralPrivateKey se fornita
@@ -388,11 +619,17 @@ export class StealthPlugin
         ephemeralPrivateKey: ephemeralPrivateKey
           ? normalizeHex(ephemeralPrivateKey, 32)
           : undefined,
+        spendingPrivateKey: spendingPrivateKey
+          ? normalizeHex(spendingPrivateKey, 32)
+          : undefined,
       });
       return await this.stealth.generateStealthAddress(
         recipientViewingKey,
         recipientSpendingKey,
-        ephemeralPrivateKey
+        ephemeralPrivateKey,
+        undefined, // viewingPrivateKey - non necessario per la generazione
+        undefined, // derivationIndex
+        spendingPrivateKey // Aggiungi il parametro spendingPrivateKey
       );
     } catch (error) {
       console.error("Error generating stealth address:", error);
@@ -517,11 +754,9 @@ export class StealthPlugin
     spendingPublicKeys: string[],
     ephemeralPrivateKey: string
   ): Promise<string[]> {
-    this.assertInitialized();
+    this.assertFullyInitialized();
 
     try {
-      this.assertInitialized();
-
       this.log(
         "info",
         "[generateFluidkeyStealthAddresses] Generating Fluidkey stealth addresses"
@@ -558,11 +793,9 @@ export class StealthPlugin
     viewingPrivateKey: string,
     spendingPrivateKey: string
   ): Promise<string> {
-    this.assertInitialized();
+    this.assertFullyInitialized();
 
     try {
-      this.assertInitialized();
-
       this.log(
         "info",
         "[generateFluidkeyStealthPrivateKey] Generating Fluidkey stealth private key"
@@ -648,13 +881,15 @@ export class StealthPlugin
     recipientGunPub: string,
     amount: string,
     token: string = ETH_TOKEN_PLACEHOLDER,
-    message?: string
+    message?: string,
+    stealthAddress?: string,
+    ephemeralPublicKey?: string
   ): Promise<{
     txHash: string;
     stealthAddress: string;
     ephemeralPublicKey: string;
   }> {
-    this.assertInitialized();
+    this.assertFullyInitialized();
 
     try {
       // Debug: Check contract state
@@ -839,11 +1074,27 @@ export class StealthPlugin
         throw new Error("Recipient's stealth keys not found");
       }
 
-      // 2. Generate stealth address
-      const stealthResult = await this.generateStealthAddress(
-        recipientKeys.viewingKey,
-        recipientKeys.spendingKey
-      );
+      // 2. Use provided stealth address or generate new one
+      let stealthResult: { stealthAddress: string; ephemeralPublicKey: string };
+
+      if (stealthAddress && ephemeralPublicKey) {
+        // Use provided stealth address
+        this.log(
+          "info",
+          `[sendStealthPayment] Using provided stealth address: ${stealthAddress}`
+        );
+        stealthResult = {
+          stealthAddress,
+          ephemeralPublicKey,
+        };
+      } else {
+        // Generate new stealth address
+        this.log("info", `[sendStealthPayment] Generating new stealth address`);
+        stealthResult = await this.generateStealthAddress(
+          recipientKeys.viewingKey,
+          recipientKeys.spendingKey
+        );
+      }
 
       // 3. Prepare ciphertext (for now, we'll use a simple hash)
       // In a real implementation, this would be encrypted with the recipient's viewing key
@@ -953,7 +1204,7 @@ export class StealthPlugin
       `[sendStealthNotification] Sending notification to: ${recipientGunPub}`
     );
 
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       this.gun
         .get("shogun")
         .get("stealth_payments")
@@ -963,17 +1214,16 @@ export class StealthPlugin
           if (ack.err) {
             this.log(
               "error",
-              `[sendStealthNotification] Error sending notification:`,
+              `[sendStealthNotification] Error saving:`,
               ack.err
             );
-            reject(new Error(ack.err));
           } else {
             this.log(
               "info",
-              `[sendStealthNotification] Notification sent successfully`
+              `[sendStealthNotification] Notification saved successfully`
             );
-            resolve();
           }
+          resolve();
         });
     });
   }
@@ -1009,6 +1259,14 @@ export class StealthPlugin
       "info",
       `[onStealthPayment] Callback registered, total callbacks: ${this.paymentCallbacks.length}`
     );
+  }
+
+  /**
+   * Remove all payment callbacks
+   */
+  clearPaymentCallbacks(): void {
+    this.paymentCallbacks = [];
+    this.log("info", `[clearPaymentCallbacks] All callbacks cleared`);
   }
 
   /**
@@ -1071,13 +1329,48 @@ export class StealthPlugin
                     "info",
                     `[loadPaymentState] Converting object data to array`
                   );
-                  const paymentsArray = Object.values(data).filter(
-                    (item: any) =>
-                      item &&
-                      typeof item === "object" &&
-                      item.stealthAddress &&
-                      !item._
-                  );
+                  const paymentsArray = Object.entries(data)
+                    .filter(([key, item]: [string, any]) => {
+                      // Ignora chiavi che sono numeri (timestamp) ma NON indirizzi Ethereum
+                      if (!isNaN(Number(key)) && !key.startsWith("0x")) {
+                        return false;
+                      }
+
+                      // Ignora chiavi che iniziano con caratteri speciali
+                      if (
+                        key.startsWith("_") ||
+                        key.startsWith("#") ||
+                        key.startsWith(">")
+                      ) {
+                        return false;
+                      }
+
+                      // Accetta indirizzi Ethereum (che iniziano con 0x)
+                      if (key.startsWith("0x")) {
+                        return (
+                          item &&
+                          typeof item === "object" &&
+                          item.amount &&
+                          item.ephemeralPublicKey &&
+                          item.sender &&
+                          !item._
+                        );
+                      }
+
+                      return false;
+                    })
+                    .map(
+                      ([key, item]: [string, any]) =>
+                        ({
+                          stealthAddress: key, // L'indirizzo stealth è la chiave
+                          amount: item.amount,
+                          ephemeralPublicKey: item.ephemeralPublicKey,
+                          sender: item.sender,
+                          message: item.message || "",
+                          timestamp: item.timestamp || Date.now(),
+                          token: item.token || ETH_TOKEN_PLACEHOLDER,
+                        }) as StealthPaymentNotification
+                    );
                   paymentsArray.forEach((payment: any) => {
                     try {
                       const paymentId = this.getPaymentId(payment);
@@ -1249,20 +1542,32 @@ export class StealthPlugin
       for (const key of validKeys) {
         const item = data[key];
 
-        // Verifica se è un oggetto con stealthAddress valido
+        // Verifica se è un oggetto con dati validi per un pagamento stealth
         if (
           item &&
           typeof item === "object" &&
-          item.stealthAddress &&
-          typeof item.stealthAddress === "string" &&
           item.amount &&
+          item.ephemeralPublicKey &&
+          item.sender &&
           !item._ // Esclude i metadati Gun
         ) {
           this.log(
             "info",
             `[handleGunData] Valid payment notification received from ${source} for key: ${key}`
           );
-          this.addPaymentToState(item as StealthPaymentNotification);
+
+          // Crea l'oggetto StealthPaymentNotification con la struttura corretta
+          const paymentNotification: StealthPaymentNotification = {
+            stealthAddress: key, // L'indirizzo stealth è la chiave
+            amount: item.amount,
+            ephemeralPublicKey: item.ephemeralPublicKey,
+            sender: item.sender,
+            message: item.message || "",
+            timestamp: item.timestamp || Date.now(),
+            token: item.token || ETH_TOKEN_PLACEHOLDER,
+          };
+
+          this.addPaymentToState(paymentNotification);
         } else {
           this.log(
             "warn",
@@ -1308,6 +1613,16 @@ export class StealthPlugin
     const userPub = this.gun.user().is.pub;
     if (!userPub) return;
 
+    // Verifica se è stata fatta una eliminazione definitiva recente (ultimi 30 secondi)
+    const timeSinceLastClear = Date.now() - this.lastClearTimestamp;
+    if (timeSinceLastClear < 30000) {
+      this.log(
+        "info",
+        `[syncNotificationsWithState] ⏭️ Saltando sincronizzazione - eliminazione definitiva effettuata ${Math.round(timeSinceLastClear / 1000)}s fa`
+      );
+      return;
+    }
+
     this.log(
       "info",
       `[syncNotificationsWithState] Syncing notifications with state`
@@ -1324,8 +1639,8 @@ export class StealthPlugin
               if (data && typeof data === "object") {
                 // Filtra le chiavi per escludere timestamp numerici e altri dati non validi
                 const validKeys = Object.keys(data).filter((key) => {
-                  // Ignora chiavi che sono numeri (timestamp)
-                  if (!isNaN(Number(key))) {
+                  // Ignora chiavi che sono numeri (timestamp) ma NON indirizzi Ethereum
+                  if (!isNaN(Number(key)) && !key.startsWith("0x")) {
                     this.log(
                       "debug",
                       `[syncNotificationsWithState] Ignoring numeric key: ${key}`
@@ -1346,24 +1661,43 @@ export class StealthPlugin
                     return false;
                   }
 
+                  // Accetta indirizzi Ethereum (che iniziano con 0x)
+                  if (key.startsWith("0x")) {
+                    this.log(
+                      "debug",
+                      `[syncNotificationsWithState] Accepting Ethereum address: ${key}`
+                    );
+                    return true;
+                  }
+
                   return true;
                 });
 
                 // Filtra i metadati Gun e altri dati non validi
                 const validItems = validKeys
-                  .map((key) => data[key])
+                  .map((key) => ({ key, item: data[key] }))
                   .filter(
-                    (item: any) =>
+                    ({ key, item }: { key: string; item: any }) =>
                       item &&
                       typeof item === "object" &&
-                      item.stealthAddress &&
                       item.amount &&
+                      item.ephemeralPublicKey &&
+                      item.sender &&
                       !item._ // Esclude i metadati Gun
                   );
 
                 const notifications: StealthPaymentNotification[] =
                   validItems.map(
-                    (item: any) => item as StealthPaymentNotification
+                    ({ key, item }: { key: string; item: any }) =>
+                      ({
+                        stealthAddress: key, // L'indirizzo stealth è la chiave
+                        amount: item.amount,
+                        ephemeralPublicKey: item.ephemeralPublicKey,
+                        sender: item.sender,
+                        message: item.message || "",
+                        timestamp: item.timestamp || Date.now(),
+                        token: item.token || ETH_TOKEN_PLACEHOLDER,
+                      }) as StealthPaymentNotification
                   );
 
                 this.log(
@@ -1443,7 +1777,9 @@ export class StealthPlugin
    * Check if the plugin is properly initialized
    */
   isInitialized(): boolean {
-    return !!(this.gun && this.provider && this.signer && this.core);
+    // Il plugin è considerato inizializzato se ha Gun e core
+    // Provider e signer possono essere impostati successivamente
+    return !!(this.gun && this.core);
   }
 
   /**
@@ -1451,7 +1787,7 @@ export class StealthPlugin
    * @private
    */
   private setupRxJSTracking(): void {
-    if (!this.core || !this.core.rx) {
+    if (!this.core || !this.core.rx || typeof this.core.rx !== "function") {
       this.log("warn", `[setupRxJSTracking] ShogunCore RxJS not available`);
       return;
     }
@@ -1463,8 +1799,17 @@ export class StealthPlugin
       const userPub = this.gun.user().is.pub;
       if (!userPub) return;
 
-      // Crea un observable per i pagamenti stealth
-      const stealthPaymentsNode = this.core.rx
+      // Crea un observable per i pagamenti stealth - CORREZIONE: chiama rx() come metodo
+      const rxInstance = this.core.rx();
+      if (!rxInstance || typeof rxInstance.get !== "function") {
+        this.log(
+          "warn",
+          `[setupRxJSTracking] RxJS instance not properly initialized`
+        );
+        return;
+      }
+
+      const stealthPaymentsNode = rxInstance
         .get("shogun")
         .get("stealth_payments")
         .get(userPub);
@@ -1514,6 +1859,8 @@ export class StealthPlugin
     stealthAddress: string,
     token: string
   ): Promise<string> {
+    this.assertFullyInitialized();
+
     if (!this.paymentForwarderContract) {
       throw new Error("PaymentForwarder contract not initialized");
     }
@@ -1540,26 +1887,111 @@ export class StealthPlugin
   async withdrawStealthPayment(
     stealthAddress: string,
     acceptor: string,
-    token: string
+    token: string,
+    ephemeralPublicKey?: string
   ): Promise<{ txHash: string }> {
-    if (!this.paymentForwarderContract) {
-      throw new Error("PaymentForwarder contract not initialized");
-    }
+    this.assertFullyInitialized();
 
     try {
-      const tx = await this.paymentForwarderContract.withdrawToken(
-        acceptor,
-        token
-      );
+      // Se è ETH, apri lo stealth address e fai un transfer diretto
+      if (token === ETH_TOKEN_PLACEHOLDER) {
+        this.log("info", "Withdrawing ETH from stealth address", {
+          stealthAddress,
+          acceptor,
+        });
 
-      this.log("info", "Stealth payment withdrawn successfully", {
-        stealthAddress,
-        acceptor,
-        token,
-        txHash: tx.hash,
-      });
+        // Ottieni le chiavi stealth dell'utente
+        const stealthKeys = await this.getUserStealthKeys();
 
-      return { txHash: tx.hash };
+        // Se non è fornito l'ephemeral public key, cerca il pagamento
+        let ephemeralKey = ephemeralPublicKey;
+        if (!ephemeralKey) {
+          const payment = await this.getPayment(stealthAddress, Date.now());
+          if (!payment) {
+            throw new Error(
+              "Payment not found for stealth address and ephemeral public key not provided"
+            );
+          }
+          ephemeralKey = payment.ephemeralPublicKey;
+        }
+
+        // Apri lo stealth address
+        const stealthWallet = await this.openStealthAddress(
+          stealthAddress,
+          ephemeralKey,
+          stealthKeys.viewingKey.privateKey,
+          stealthKeys.spendingKey.privateKey
+        );
+
+        // Connetti il wallet al provider
+        const connectedWallet = stealthWallet.connect(this.provider!);
+
+        // Ottieni il balance dello stealth address
+        const balance = await this.provider!.getBalance(stealthAddress);
+        if (balance === 0n) {
+          throw new Error("No ETH balance in stealth address");
+        }
+
+        // Calcola il gas fee con un margine di sicurezza del 50%
+        const feeData = await this.provider!.getFeeData();
+        const gasPrice = feeData.gasPrice || 20000000000n; // Fallback a 20 gwei
+        const gasLimit = 21000n; // Transfer standard
+        const baseGasFee = gasLimit * gasPrice;
+        const gasFee = (baseGasFee * 150n) / 100n; // Aggiungi 50% di margine
+
+        // Verifica preliminare se il balance è sufficiente
+        if (balance <= gasFee) {
+          const minRequired = gasFee + 1n; // Almeno 1 wei in più
+          throw new Error(
+            `Insufficient balance for withdrawal. Current balance: ${ethers.formatEther(balance)} ETH. Required (including 50% gas margin): ${ethers.formatEther(minRequired)} ETH. Please add more ETH to the stealth address or wait for lower gas prices.`
+          );
+        }
+
+        // Calcola l'importo da inviare (balance - gas fee)
+        const amountToSend = balance - gasFee;
+
+        // Invia la transazione
+        const tx = await connectedWallet.sendTransaction({
+          to: acceptor,
+          value: amountToSend,
+          gasLimit: gasLimit,
+        });
+
+        this.log("info", "ETH stealth payment withdrawn successfully", {
+          stealthAddress,
+          acceptor,
+          txHash: tx.hash,
+          amount: ethers.formatEther(amountToSend),
+          gasUsed: gasLimit.toString(),
+        });
+
+        return { txHash: tx.hash };
+      } else {
+        // Per i token ERC-20, usa il contratto PaymentForwarder
+        if (!this.paymentForwarderContract) {
+          throw new Error("PaymentForwarder contract not initialized");
+        }
+
+        this.log("info", "Withdrawing ERC-20 token from stealth address", {
+          stealthAddress,
+          acceptor,
+          token,
+        });
+
+        const tx = await this.paymentForwarderContract.withdrawToken(
+          acceptor,
+          token
+        );
+
+        this.log("info", "ERC-20 stealth payment withdrawn successfully", {
+          stealthAddress,
+          acceptor,
+          token,
+          txHash: tx.hash,
+        });
+
+        return { txHash: tx.hash };
+      }
     } catch (error) {
       this.log("error", "Error withdrawing stealth payment", error);
       throw error;
@@ -1601,34 +2033,324 @@ export class StealthPlugin
               `[getStealthPaymentHistory] Data is object, processing...`
             );
 
-            const payments: StealthPaymentNotification[] = Object.values(data)
-              .filter((item: any) => {
-                const isValid =
-                  item &&
-                  typeof item === "object" &&
-                  item.stealthAddress &&
-                  item.amount;
+            // Filtra le chiavi per escludere metadati Gun e altri dati non validi
+            const validKeys = Object.keys(data).filter((key) => {
+              // Ignora chiavi che sono numeri (timestamp) ma NON indirizzi Ethereum
+              if (!isNaN(Number(key)) && !key.startsWith("0x")) {
                 this.log(
-                  "info",
-                  `[getStealthPaymentHistory] Item validation:`,
-                  { item, isValid }
+                  "debug",
+                  `[getStealthPaymentHistory] Ignoring numeric key: ${key}`
                 );
-                return isValid;
-              })
-              .map((item: any) => item as StealthPaymentNotification)
-              .sort(
-                (
-                  a: StealthPaymentNotification,
-                  b: StealthPaymentNotification
-                ) => b.timestamp - a.timestamp
-              );
+                return false;
+              }
+
+              // Ignora chiavi che iniziano con caratteri speciali
+              if (
+                key.startsWith("_") ||
+                key.startsWith("#") ||
+                key.startsWith(">")
+              ) {
+                this.log(
+                  "debug",
+                  `[getStealthPaymentHistory] Ignoring special key: ${key}`
+                );
+                return false;
+              }
+
+              // Accetta indirizzi Ethereum (che iniziano con 0x)
+              if (key.startsWith("0x")) {
+                this.log(
+                  "debug",
+                  `[getStealthPaymentHistory] Accepting Ethereum address: ${key}`
+                );
+                return true;
+              }
+
+              return true;
+            });
 
             this.log(
               "info",
-              `[getStealthPaymentHistory] Processed payments:`,
-              payments
+              `[getStealthPaymentHistory] Valid keys found: ${validKeys.length}`
             );
-            resolve(payments);
+
+            // Se non ci sono chiavi valide, risolvi con array vuoto
+            if (validKeys.length === 0) {
+              this.log(
+                "info",
+                `[getStealthPaymentHistory] No valid keys found, returning empty array`
+              );
+              resolve([]);
+              return;
+            }
+
+            // Array per tenere traccia delle promesse per ogni riferimento
+            const paymentPromises: Promise<StealthPaymentNotification | null>[] =
+              [];
+
+            // Processa ogni chiave valida
+            validKeys.forEach((key) => {
+              const item = data[key];
+              this.log(
+                "debug",
+                `[getStealthPaymentHistory] Processing key ${key}:`,
+                item
+              );
+
+              // Debug dettagliato dell'elemento
+              this.log(
+                "debug",
+                `[getStealthPaymentHistory] Item analysis for key ${key}:`,
+                {
+                  item,
+                  itemType: typeof item,
+                  hasHashProperty:
+                    item && typeof item === "object" && "#" in item,
+                  hashValue: item?.["#"],
+                  itemKeys:
+                    item && typeof item === "object" ? Object.keys(item) : [],
+                }
+              );
+
+              // Se l'elemento ha un riferimento Gun (#), seguilo
+              if (item && typeof item === "object" && item["#"]) {
+                this.log(
+                  "debug",
+                  `[getStealthPaymentHistory] Following Gun reference for key ${key}: ${item["#"]}`
+                );
+
+                const promise = new Promise<StealthPaymentNotification | null>(
+                  (resolveItem) => {
+                    // Usa il riferimento per ottenere i dati reali
+                    this.gun.get(item["#"]).once((realData: any) => {
+                      this.log(
+                        "debug",
+                        `[getStealthPaymentHistory] Real data for key ${key}:`,
+                        realData
+                      );
+
+                      // Controlla se realData esiste e non è undefined
+                      if (!realData || realData === undefined) {
+                        this.log(
+                          "warn",
+                          `[getStealthPaymentHistory] No data found for key ${key}`
+                        );
+
+                        // Prova a ottenere i dati direttamente senza riferimento
+                        this.log(
+                          "debug",
+                          `[getStealthPaymentHistory] Trying direct access for key ${key}`
+                        );
+
+                        // Prova ad accedere direttamente al nodo
+                        this.gun
+                          .get("shogun")
+                          .get("stealth_payments")
+                          .get(userPub)
+                          .get(key)
+                          .once((directData: any) => {
+                            this.log(
+                              "debug",
+                              `[getStealthPaymentHistory] Direct data for key ${key}:`,
+                              directData
+                            );
+
+                            if (directData && typeof directData === "object") {
+                              // Valida i dati diretti
+                              const isValid =
+                                directData.amount &&
+                                directData.ephemeralPublicKey &&
+                                directData.sender;
+
+                              if (isValid) {
+                                const paymentNotification: StealthPaymentNotification =
+                                  {
+                                    stealthAddress: key,
+                                    amount: directData.amount,
+                                    ephemeralPublicKey:
+                                      directData.ephemeralPublicKey,
+                                    sender: directData.sender,
+                                    message: directData.message || "",
+                                    timestamp:
+                                      directData.timestamp || Date.now(),
+                                    token:
+                                      directData.token || ETH_TOKEN_PLACEHOLDER,
+                                  };
+                                resolveItem(paymentNotification);
+                              } else {
+                                this.log(
+                                  "warn",
+                                  `[getStealthPaymentHistory] Invalid direct data for key ${key}`
+                                );
+                                resolveItem(null);
+                              }
+                            } else {
+                              this.log(
+                                "warn",
+                                `[getStealthPaymentHistory] No direct data found for key ${key}`
+                              );
+                              resolveItem(null);
+                            }
+                          });
+                        return;
+                      }
+
+                      let parsedRealData;
+                      try {
+                        // Controlla se realData è già un oggetto o una stringa
+                        if (typeof realData === "object" && realData !== null) {
+                          // È già un oggetto JavaScript, controlla se ha la proprietà 'data'
+                          if (
+                            realData.data &&
+                            typeof realData.data === "string"
+                          ) {
+                            // Estrai e parsifica la proprietà 'data'
+                            parsedRealData = JSON.parse(realData.data);
+                          } else {
+                            // Usa l'oggetto direttamente se non ha la proprietà 'data'
+                            parsedRealData = realData;
+                          }
+                        } else if (typeof realData === "string") {
+                          // È una stringa JSON, parsificarla
+                          parsedRealData = JSON.parse(realData);
+                        } else {
+                          this.log(
+                            "warn",
+                            `[getStealthPaymentHistory] Unexpected data type for key ${key}: ${typeof realData}`
+                          );
+                          resolveItem(null);
+                          return;
+                        }
+                      } catch (error) {
+                        this.log(
+                          "warn",
+                          `[getStealthPaymentHistory] Error parsing realData for key ${key}:`,
+                          error
+                        );
+                        resolveItem(null);
+                        return;
+                      }
+
+                      // Valida i dati reali
+                      const isValid =
+                        parsedRealData &&
+                        typeof parsedRealData === "object" &&
+                        parsedRealData.amount &&
+                        parsedRealData.ephemeralPublicKey &&
+                        parsedRealData.sender;
+
+                      this.log(
+                        "info",
+                        `[getStealthPaymentHistory] Item validation for key ${key}:`,
+                        {
+                          realData: parsedRealData,
+                          isValid,
+                          hasAmount: parsedRealData?.amount,
+                          hasEphemeralPublicKey:
+                            parsedRealData?.ephemeralPublicKey,
+                          hasSender: parsedRealData?.sender,
+                          itemType: typeof parsedRealData,
+                        }
+                      );
+
+                      if (isValid) {
+                        // Crea l'oggetto StealthPaymentNotification con la struttura corretta
+                        const paymentNotification: StealthPaymentNotification =
+                          {
+                            stealthAddress: key, // L'indirizzo stealth è la chiave
+                            amount: parsedRealData.amount,
+                            ephemeralPublicKey:
+                              parsedRealData.ephemeralPublicKey,
+                            sender: parsedRealData.sender,
+                            message: parsedRealData.message || "",
+                            timestamp: parsedRealData.timestamp || Date.now(),
+                            token:
+                              parsedRealData.token || ETH_TOKEN_PLACEHOLDER,
+                          };
+
+                        resolveItem(paymentNotification);
+                      } else {
+                        this.log(
+                          "warn",
+                          `[getStealthPaymentHistory] Invalid data for key ${key}`
+                        );
+                        resolveItem(null);
+                      }
+                    });
+                  }
+                );
+
+                paymentPromises.push(promise);
+              } else {
+                this.log(
+                  "debug",
+                  `[getStealthPaymentHistory] No Gun reference found for key ${key}, validating directly`
+                );
+
+                // Se l'elemento non ha un riferimento, valida direttamente
+                const isValid =
+                  item &&
+                  typeof item === "object" &&
+                  item.amount &&
+                  item.ephemeralPublicKey &&
+                  item.sender &&
+                  !item._; // Esclude i metadati Gun
+
+                this.log(
+                  "info",
+                  `[getStealthPaymentHistory] Item validation for key ${key}:`,
+                  {
+                    item,
+                    isValid,
+                    hasAmount: item?.amount,
+                    hasEphemeralPublicKey: item?.ephemeralPublicKey,
+                    hasSender: item?.sender,
+                    isNotGunMetadata: !item?._,
+                    itemType: typeof item,
+                  }
+                );
+
+                if (isValid) {
+                  // Crea l'oggetto StealthPaymentNotification con la struttura corretta
+                  const paymentNotification: StealthPaymentNotification = {
+                    stealthAddress: key, // L'indirizzo stealth è la chiave
+                    amount: item.amount,
+                    ephemeralPublicKey: item.ephemeralPublicKey,
+                    sender: item.sender,
+                    message: item.message || "",
+                    timestamp: item.timestamp || Date.now(),
+                    token: item.token || ETH_TOKEN_PLACEHOLDER,
+                  };
+
+                  paymentPromises.push(Promise.resolve(paymentNotification));
+                } else {
+                  paymentPromises.push(Promise.resolve(null));
+                }
+              }
+            });
+
+            // Aspetta che tutte le promesse siano risolte
+            Promise.all(paymentPromises).then((results) => {
+              // Filtra i risultati null e ordina per timestamp
+              const payments: StealthPaymentNotification[] = results
+                .filter(
+                  (payment): payment is StealthPaymentNotification =>
+                    payment !== null
+                )
+                .sort(
+                  (
+                    a: StealthPaymentNotification,
+                    b: StealthPaymentNotification
+                  ) => b.timestamp - a.timestamp
+                );
+
+              this.log(
+                "info",
+                `[getStealthPaymentHistory] Processed payments:`,
+                payments
+              );
+              resolve(payments);
+            });
           } else {
             this.log(
               "info",
@@ -1874,25 +2596,119 @@ export class StealthPlugin
    * @returns Number of payments cleared
    */
   async clearProcessedPayments(): Promise<number> {
-    const pendingPayments = Array.from(this.paymentState.values()).filter(
-      (payment) => payment.status !== "claimed"
-    );
+    const totalPayments = this.paymentState.size;
 
+    // Clear all payments from state
     this.paymentState.clear();
-    pendingPayments.forEach((payment) => {
-      const paymentId = this.getPaymentId(payment);
-      this.paymentState.set(paymentId, payment);
-    });
 
-    await this.savePaymentState(Array.from(this.paymentState.values()));
+    // Remove data from GunDB completely - ELIMINAZIONE DEFINITIVA
+    await this.clearPaymentDataFromGunDB();
 
-    const clearedCount = this.paymentState.size - pendingPayments.length;
+    // Imposta il timestamp dell'ultima eliminazione definitiva
+    this.lastClearTimestamp = Date.now();
+
     this.log(
       "info",
-      `[clearProcessedPayments] Cleared ${clearedCount} processed payments`
+      `[clearProcessedPayments] ✅ ELIMINATI DEFINITIVAMENTE ${totalPayments} pagamenti da stato e GunDB`
     );
 
-    return clearedCount;
+    return totalPayments;
+  }
+
+  /**
+   * Clear payment data from GunDB completely - ELIMINAZIONE DEFINITIVA
+   */
+  private async clearPaymentDataFromGunDB(): Promise<void> {
+    const userPub = this.gun.user().is.pub;
+    if (!userPub) return;
+
+    return new Promise((resolve) => {
+      try {
+        const timeout = setTimeout(() => {
+          this.log("warn", `[clearPaymentDataFromGunDB] Timeout clearing data`);
+          resolve();
+        }, 15000); // Aumentato timeout per operazioni più lunghe
+
+        this.log(
+          "info",
+          `[clearPaymentDataFromGunDB] 🗑️ Iniziando eliminazione definitiva dei dati...`
+        );
+
+        // 1. Clear payment state
+        this.gun
+          .get("shogun")
+          .get("stealth_payment_state")
+          .get(userPub)
+          .put(null, (ack: any) => {
+            if (ack && ack.err) {
+              this.log(
+                "error",
+                `[clearPaymentDataFromGunDB] ❌ Errore eliminazione payment state:`,
+                ack.err
+              );
+            } else {
+              this.log(
+                "info",
+                `[clearPaymentDataFromGunDB] ✅ Payment state eliminato da GunDB`
+              );
+            }
+
+            // 2. Clear original notifications - ELIMINAZIONE DEFINITIVA
+            this.gun
+              .get("shogun")
+              .get("stealth_payments")
+              .get(userPub)
+              .put(null, (ack2: any) => {
+                if (ack2 && ack2.err) {
+                  this.log(
+                    "error",
+                    `[clearPaymentDataFromGunDB] ❌ Errore eliminazione notifications:`,
+                    ack2.err
+                  );
+                } else {
+                  this.log(
+                    "info",
+                    `[clearPaymentDataFromGunDB] ✅ Notifications eliminate da GunDB`
+                  );
+                }
+
+                // 3. Clear anche i dati di backup/history se esistono
+                this.gun
+                  .get("shogun")
+                  .get("stealth_payment_history")
+                  .get(userPub)
+                  .put(null, (ack3: any) => {
+                    clearTimeout(timeout);
+                    if (ack3 && ack3.err) {
+                      this.log(
+                        "warn",
+                        `[clearPaymentDataFromGunDB] ⚠️ Errore eliminazione history (opzionale):`,
+                        ack3.err
+                      );
+                    } else {
+                      this.log(
+                        "info",
+                        `[clearPaymentDataFromGunDB] ✅ Payment history eliminata da GunDB`
+                      );
+                    }
+
+                    this.log(
+                      "info",
+                      `[clearPaymentDataFromGunDB] 🎉 ELIMINAZIONE DEFINITIVA COMPLETATA`
+                    );
+                    resolve();
+                  });
+              });
+          });
+      } catch (error) {
+        this.log(
+          "error",
+          `[clearPaymentDataFromGunDB] ❌ Errore generale:`,
+          error
+        );
+        resolve();
+      }
+    });
   }
 
   /**
@@ -2024,7 +2840,317 @@ export class StealthPlugin
     stealthAddress: string,
     timestamp: number
   ): Promise<boolean> {
-    const paymentId = `${stealthAddress}_${timestamp}`;
-    return this.paymentState.has(paymentId);
+    const payment = await this.getPayment(stealthAddress, timestamp);
+    return payment !== null;
+  }
+
+  /**
+   * Verifica se le chiavi stealth attuali possono aprire uno stealth address specifico
+   * @param stealthAddress Lo stealth address da verificare
+   * @param ephemeralPublicKey La chiave pubblica ephemeral
+   * @returns Promise<boolean>
+   */
+  async canOpenStealthAddress(
+    stealthAddress: string,
+    ephemeralPublicKey: string
+  ): Promise<boolean> {
+    try {
+      const stealthKeys = await this.getUserStealthKeys();
+
+      // Tenta di aprire lo stealth address
+      await this.openStealthAddress(
+        stealthAddress,
+        ephemeralPublicKey,
+        stealthKeys.viewingKey.privateKey,
+        stealthKeys.spendingKey.privateKey
+      );
+
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /**
+   * Scan on-chain per ripopolare il database GunDB con pagamenti stealth da un blocco specifico
+   * @param fromBlock Blocco iniziale per lo scan (es. 8796157)
+   * @param toBlock Blocco finale per lo scan (opzionale, se non specificato usa l'ultimo blocco)
+   * @param stealthAddresses Array di indirizzi stealth da monitorare (opzionale, se non specificato usa le chiavi dell'utente)
+   * @returns Numero di pagamenti trovati e salvati
+   */
+  async scanOnChainPayments(
+    fromBlock: number,
+    toBlock?: number,
+    stealthAddresses?: string[]
+  ): Promise<{
+    scannedBlocks: number;
+    foundPayments: number;
+    savedPayments: number;
+    errors: string[];
+  }> {
+    this.assertFullyInitialized();
+
+    const userPub = this.gun.user().is.pub;
+    if (!userPub) {
+      throw new Error("User not authenticated");
+    }
+
+    if (!this.provider || !this.paymentForwarderContract) {
+      throw new Error("Provider or PaymentForwarder contract not available");
+    }
+
+    const errors: string[] = [];
+    let foundPayments = 0;
+    let savedPayments = 0;
+
+    try {
+      this.log(
+        "info",
+        `[scanOnChainPayments] 🔍 Iniziando scan on-chain da blocco ${fromBlock}`
+      );
+
+      // Ottieni l'ultimo blocco se toBlock non è specificato
+      const latestBlock = await this.provider.getBlockNumber();
+      const endBlock = toBlock || latestBlock;
+
+      this.log(
+        "info",
+        `[scanOnChainPayments] 📊 Scan range: ${fromBlock} -> ${endBlock} (${endBlock - fromBlock + 1} blocchi)`
+      );
+
+      // Ottieni le chiavi stealth dell'utente se non sono specificate
+      let addressesToScan = stealthAddresses;
+      if (!addressesToScan || addressesToScan.length === 0) {
+        try {
+          const userKeys = await this.getUserStealthKeys();
+          // Genera alcuni indirizzi stealth per lo scan
+          const ephemeralKey = await this.generateEphemeralKeyPair();
+          const stealthAddress = await this.generateStealthAddress(
+            userKeys.viewingKey.publicKey,
+            userKeys.spendingKey.publicKey,
+            ephemeralKey.privateKey
+          );
+          addressesToScan = [stealthAddress.stealthAddress];
+          this.log(
+            "info",
+            `[scanOnChainPayments] 🔑 Usando indirizzo stealth generato: ${stealthAddress.stealthAddress}`
+          );
+        } catch (keyError) {
+          this.log(
+            "error",
+            `[scanOnChainPayments] ❌ Errore nel generare indirizzi stealth:`,
+            keyError
+          );
+          errors.push(`Errore chiavi stealth: ${keyError}`);
+          return {
+            scannedBlocks: 0,
+            foundPayments: 0,
+            savedPayments: 0,
+            errors,
+          };
+        }
+      }
+
+      // Ottieni gli eventi Announcement dal contratto
+      const filter = this.paymentForwarderContract.filters.Announcement();
+
+      this.log(
+        "info",
+        `[scanOnChainPayments] 🔍 Cercando eventi Announcement...`
+      );
+
+      const events = await this.paymentForwarderContract.queryFilter(
+        filter,
+        fromBlock,
+        endBlock
+      );
+
+      this.log(
+        "info",
+        `[scanOnChainPayments] 📋 Trovati ${events.length} eventi totali`
+      );
+
+      // Debug: mostra gli indirizzi negli eventi trovati
+      const eventAddresses = events
+        .filter((event) => event && "args" in event && event.args)
+        .map((event) => (event as any).args[0]); // receiver address
+
+      this.log(
+        "info",
+        `[scanOnChainPayments] 🔍 Indirizzi negli eventi trovati: ${eventAddresses.join(", ")}`
+      );
+
+      // Filtra gli eventi per gli indirizzi stealth dell'utente
+      const relevantEvents = events.filter((event) => {
+        // Verifica che l'evento sia un EventLog con args
+        if (!event || !("args" in event) || !event.args) return false;
+
+        // Per l'evento Announcement: (address indexed receiver, uint256 amount, address indexed token, bytes32 pkx, bytes32 ciphertext)
+        const receiver = event.args[0]; // receiver (stealth address)
+
+        // Verifica se l'utente può aprire questo indirizzo stealth
+        // Per ora, accetta tutti gli eventi e poi filtra quelli che può aprire
+        return true; // Accetta tutti gli eventi per ora
+      });
+
+      this.log(
+        "info",
+        `[scanOnChainPayments] 🎯 ${relevantEvents.length} eventi rilevanti per gli indirizzi dell'utente`
+      );
+
+      // Processa ogni evento rilevante
+      for (const event of relevantEvents) {
+        try {
+          // Verifica che l'evento sia un EventLog con args
+          if (!event || !("args" in event) || !event.args) continue;
+
+          // Estrai i parametri dall'evento Announcement
+          // event Announcement(address indexed receiver, uint256 amount, address indexed token, bytes32 pkx, bytes32 ciphertext)
+          const receiver = event.args[0]; // receiver (stealth address)
+          const amount = event.args[1]; // amount
+          const token = event.args[2]; // token
+          const pkx = event.args[3]; // pkx (ephemeral public key x)
+          const ciphertext = event.args[4]; // ciphertext
+
+          this.log(
+            "info",
+            `[scanOnChainPayments] 🔍 Processando evento per indirizzo: ${receiver}`
+          );
+
+          // Verifica se l'utente può aprire questo indirizzo stealth
+          // Per ora, accetta tutti gli eventi e li salva
+          // TODO: Implementare verifica con le chiavi stealth dell'utente
+
+          // Ottieni il timestamp del blocco
+          const block = await this.provider.getBlock(event.blockNumber);
+          const timestamp = block?.timestamp || Date.now();
+
+          // Crea la notifica di pagamento
+          const paymentNotification: StealthPaymentNotification = {
+            stealthAddress: receiver,
+            amount: amount.toString(),
+            ephemeralPublicKey: pkx, // Usa pkx come ephemeral public key
+            sender: event.transactionHash, // Usa il tx hash come sender per ora
+            message: "", // L'evento Announcement non ha un campo message
+            timestamp: timestamp * 1000, // Converti in millisecondi
+            token: token || ETH_TOKEN_PLACEHOLDER,
+          };
+
+          // Verifica se il pagamento è già presente
+          const paymentId = this.getPaymentId(paymentNotification);
+          if (!this.paymentState.has(paymentId)) {
+            // Aggiungi il pagamento allo stato
+            this.addPaymentToState(paymentNotification);
+            foundPayments++;
+
+            // Salva nel database GunDB
+            await this.savePaymentNotificationToGunDB(paymentNotification);
+            savedPayments++;
+
+            this.log(
+              "info",
+              `[scanOnChainPayments] ✅ Pagamento salvato: ${paymentNotification.stealthAddress} - ${paymentNotification.amount} ${paymentNotification.token}`
+            );
+          } else {
+            this.log(
+              "debug",
+              `[scanOnChainPayments] ⏭️ Pagamento già presente: ${paymentId}`
+            );
+          }
+        } catch (eventError) {
+          const errorMsg = `Errore processando evento ${event.transactionHash}: ${eventError}`;
+          this.log("error", `[scanOnChainPayments] ❌ ${errorMsg}`);
+          errors.push(errorMsg);
+        }
+      }
+
+      // Salva lo stato aggiornato
+      if (savedPayments > 0) {
+        const allPayments = Array.from(this.paymentState.values());
+        await this.savePaymentState(allPayments);
+      }
+
+      this.log(
+        "info",
+        `[scanOnChainPayments] 🎉 Scan completato: ${foundPayments} pagamenti trovati, ${savedPayments} salvati`
+      );
+
+      return {
+        scannedBlocks: endBlock - fromBlock + 1,
+        foundPayments,
+        savedPayments,
+        errors,
+      };
+    } catch (error) {
+      const errorMsg = `Errore generale durante lo scan: ${error}`;
+      this.log("error", `[scanOnChainPayments] ❌ ${errorMsg}`);
+      errors.push(errorMsg);
+      return {
+        scannedBlocks: 0,
+        foundPayments: 0,
+        savedPayments: 0,
+        errors,
+      };
+    }
+  }
+
+  /**
+   * Salva una notifica di pagamento nel database GunDB
+   * @param notification Notifica di pagamento da salvare
+   */
+  private async savePaymentNotificationToGunDB(
+    notification: StealthPaymentNotification
+  ): Promise<void> {
+    const userPub = this.gun.user().is.pub;
+    if (!userPub) return;
+
+    return new Promise((resolve) => {
+      this.gun
+        .get("shogun")
+        .get("stealth_payments")
+        .get(userPub)
+        .get(notification.stealthAddress)
+        .put(
+          {
+            amount: notification.amount,
+            ephemeralPublicKey: notification.ephemeralPublicKey,
+            sender: notification.sender,
+            message: notification.message,
+            timestamp: notification.timestamp,
+            token: notification.token,
+          },
+          (ack: any) => {
+            if (ack && ack.err) {
+              this.log(
+                "error",
+                `[savePaymentNotificationToGunDB] ❌ Errore salvataggio:`,
+                ack.err
+              );
+            } else {
+              this.log(
+                "info",
+                `[savePaymentNotificationToGunDB] ✅ Notifica salvata per ${notification.stealthAddress}`
+              );
+            }
+            resolve();
+          }
+        );
+    });
+  }
+
+  /**
+   * Forza la sincronizzazione anche dopo una eliminazione definitiva
+   * @param force Se true, ignora il timestamp dell'ultima eliminazione
+   */
+  async forceSyncNotifications(force: boolean = false): Promise<void> {
+    if (force) {
+      this.lastClearTimestamp = 0; // Reset del timestamp per forzare la sincronizzazione
+      this.log(
+        "info",
+        `[forceSyncNotifications] 🔄 Forzando sincronizzazione...`
+      );
+    }
+
+    await this.syncNotificationsWithState();
   }
 }

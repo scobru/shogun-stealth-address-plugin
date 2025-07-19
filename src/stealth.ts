@@ -3,31 +3,36 @@
  */
 import { ethers } from "ethers";
 import { SigningKey } from "ethers";
-import { 
-  EphemeralKeyPair, 
-  StealthAddressResult, 
-  LogLevel, 
+import {
+  EphemeralKeyPair,
+  StealthAddressResult,
+  LogLevel,
   LogMessage,
   StealthKeys,
-  FluidkeySignature
+  FluidkeySignature,
 } from "./types";
 // Import Fluidkey Stealth Account Kit functions
-import { 
+import {
   generateKeysFromSignature,
   extractViewingPrivateKeyNode,
   generateEphemeralPrivateKey,
   generateStealthAddresses,
   generateStealthPrivateKey,
 } from "@fluidkey/stealth-account-kit";
-import { HDKey } from '@scure/bip32';
+import { HDKey } from "@scure/bip32";
 
 // Utility di normalizzazione hex
 export function normalizeHex(str: string, length?: number): string {
-  if (!str) return '';
+  if (!str) return "";
   let s = str.toLowerCase();
-  if (!s.startsWith('0x')) s = '0x' + s;
+  if (!s.startsWith("0x")) s = "0x" + s;
   if (length && s.length !== 2 + length * 2) {
-    s = '0x' + s.slice(2).padStart(length * 2, '0').slice(0, length * 2);
+    s =
+      "0x" +
+      s
+        .slice(2)
+        .padStart(length * 2, "0")
+        .slice(0, length * 2);
   }
   return s;
 }
@@ -43,22 +48,22 @@ export class Stealth {
    * Logs a message based on the current log level
    */
   private log(level: LogLevel | string, message: string, ...args: any[]): void {
-    const levelValue = typeof level === 'string' ? level as LogLevel : level;
-    
+    const levelValue = typeof level === "string" ? (level as LogLevel) : level;
+
     // Simple log level hierarchy: error > warn > info > debug
-    const levelHierarchy = { "error": 0, "warn": 1, "info": 2, "debug": 3 };
+    const levelHierarchy = { error: 0, warn: 1, info: 2, debug: 3 };
     const currentLevelValue = levelHierarchy[this.logLevel] ?? 2;
     const messageLevelValue = levelHierarchy[levelValue] ?? 2;
-    
+
     if (messageLevelValue <= currentLevelValue) {
       const timestamp = new Date().toISOString();
       const logMessage: LogMessage = {
         timestamp,
         level: levelValue,
         message,
-        data: args.length > 0 ? args : undefined
+        data: args.length > 0 ? args : undefined,
       };
-      
+
       switch (levelValue) {
         case "error":
           console.error(`[${timestamp}] ERROR: ${message}`, ...args);
@@ -83,28 +88,29 @@ export class Stealth {
     try {
       // Remove any prefixes and ensure it's a valid public key
       let normalizedKey = publicKey;
-      
-      if (normalizedKey.startsWith('0x')) {
+
+      if (normalizedKey.startsWith("0x")) {
         normalizedKey = normalizedKey.slice(2);
       }
-      
+
       // If it's an uncompressed key (130 chars), convert to compressed (66 chars)
       if (normalizedKey.length === 130) {
         // Use ethers.SigningKey.computePublicKey to get the compressed form
         // The `true` parameter ensures compressed format
-        return SigningKey.computePublicKey('0x' + normalizedKey, true);
+        return SigningKey.computePublicKey("0x" + normalizedKey, true);
       }
-      
+
       // If it's already compressed, ensure it has the 0x prefix
       if (normalizedKey.length === 66) {
-        return '0x' + normalizedKey;
+        return "0x" + normalizedKey;
       }
-      
+
       // Default: return as-is with 0x prefix
-      return normalizedKey.startsWith('0x') ? normalizedKey : '0x' + normalizedKey;
-      
+      return normalizedKey.startsWith("0x")
+        ? normalizedKey
+        : "0x" + normalizedKey;
     } catch (error) {
-      this.log('warn', 'Error normalizing public key:', error);
+      this.log("warn", "Error normalizing public key:", error);
       return publicKey; // Return original if normalization fails
     }
   }
@@ -159,16 +165,16 @@ export class Stealth {
     // In a real implementation, this would retrieve keys from Gun database
     const wallet1 = ethers.Wallet.createRandom();
     const wallet2 = ethers.Wallet.createRandom();
-    
+
     return {
       viewingKey: {
         privateKey: wallet1.privateKey,
-        publicKey: wallet1.signingKey.publicKey
+        publicKey: wallet1.signingKey.publicKey,
       },
       spendingKey: {
         privateKey: wallet2.privateKey,
-        publicKey: wallet2.signingKey.publicKey
-      }
+        publicKey: wallet2.signingKey.publicKey,
+      },
     };
   }
 
@@ -192,7 +198,7 @@ export class Stealth {
   }> {
     try {
       // Construct the signature string from r, s, v components
-      const signatureString = `${signature.r}${signature.s}${signature.v.toString(16).padStart(2, '0')}`;
+      const signatureString = `${signature.r}${signature.s}${signature.v.toString(16).padStart(2, "0")}`;
       const result = generateKeysFromSignature(`0x${signatureString}`);
 
       const viewingWallet = new ethers.Wallet(result.viewingPrivateKey);
@@ -202,7 +208,7 @@ export class Stealth {
         viewingPrivateKey: result.viewingPrivateKey,
         viewingPublicKey: viewingWallet.signingKey.publicKey,
         spendingPrivateKey: result.spendingPrivateKey,
-        spendingPublicKey: spendingWallet.signingKey.publicKey
+        spendingPublicKey: spendingWallet.signingKey.publicKey,
       };
     } catch (error) {
       this.log("error", "Error generating keys from signature", error);
@@ -222,7 +228,8 @@ export class Stealth {
     spendingPublicKey: string,
     ephemeralPrivateKey?: string,
     viewingPrivateKey?: string,
-    derivationIndex?: number
+    derivationIndex?: number,
+    spendingPrivateKey?: string
   ): Promise<StealthAddressResult> {
     try {
       this.log("info", "Generating stealth address using Fluidkey method");
@@ -235,15 +242,15 @@ export class Stealth {
       let ephemeralKey = ephemeralPrivateKey;
       if (!ephemeralKey) {
         if (viewingPrivateKey) {
-          const cleanPriv = viewingPrivateKey.startsWith('0x')
+          const cleanPriv = viewingPrivateKey.startsWith("0x")
             ? viewingPrivateKey.slice(2)
             : viewingPrivateKey;
-          const hdKey = HDKey.fromMasterSeed(Buffer.from(cleanPriv, 'hex'));
+          const hdKey = HDKey.fromMasterSeed(Buffer.from(cleanPriv, "hex"));
           const result = generateEphemeralPrivateKey({
             viewingPrivateKeyNode: hdKey,
             nonce: 0n,
             chainId: 1,
-            coinType: 60
+            coinType: 60,
           });
           ephemeralKey = result.ephemeralPrivateKey;
         } else {
@@ -256,8 +263,15 @@ export class Stealth {
       this.log("debug", "[GEN] Params", {
         viewingPublicKey: normalizeHex(viewingPublicKey, 64),
         spendingPublicKey: normalizeHex(spendingPublicKey, 64),
-        ephemeralPrivateKey: ephemeralPrivateKey ? normalizeHex(ephemeralPrivateKey, 32) : undefined,
-        viewingPrivateKey: viewingPrivateKey ? normalizeHex(viewingPrivateKey, 32) : undefined,
+        ephemeralPrivateKey: ephemeralPrivateKey
+          ? normalizeHex(ephemeralPrivateKey, 32)
+          : undefined,
+        viewingPrivateKey: viewingPrivateKey
+          ? normalizeHex(viewingPrivateKey, 32)
+          : undefined,
+        spendingPrivateKey: spendingPrivateKey
+          ? normalizeHex(spendingPrivateKey, 32)
+          : undefined,
         derivationIndex,
       });
 
@@ -269,27 +283,44 @@ export class Stealth {
 
       const stealthAddress = result.stealthAddresses[0];
       const ephemeralWallet = new ethers.Wallet(ephemeralKey as `0x${string}`);
-      
+
       this.log("debug", "[GEN] Result", {
         stealthAddress,
-        ephemeralPublicKey: normalizeHex(ephemeralWallet.signingKey.publicKey, 33), // Changed from 65 to 33
+        ephemeralPublicKey: normalizeHex(
+          ephemeralWallet.signingKey.publicKey,
+          33
+        ), // Changed from 65 to 33
       });
 
-      this.log("info", "Stealth address generated successfully using Fluidkey", {
-        stealthAddress,
-        ephemeralPublicKey: ephemeralWallet.signingKey.publicKey
-      });
+      this.log(
+        "info",
+        "Stealth address generated successfully using Fluidkey",
+        {
+          stealthAddress,
+          ephemeralPublicKey: ephemeralWallet.signingKey.publicKey,
+        }
+      );
 
       return {
         stealthAddress,
         ephemeralPublicKey: ephemeralWallet.signingKey.publicKey,
         recipientViewingPublicKey: normalizedViewingKey,
-        recipientSpendingPublicKey: normalizedSpendingKey
+        recipientSpendingPublicKey: normalizedSpendingKey,
       };
-
     } catch (error) {
-      this.log('error', '[generateStealthAddress] Error with Fluidkey method:', error);
-      throw error;
+      this.log(
+        "error",
+        "[generateStealthAddress] Error with Fluidkey method:",
+        error
+      );
+
+      // Fallback to original method with spending private key
+      return this.generateStealthAddressOriginal(
+        viewingPublicKey,
+        spendingPublicKey,
+        ephemeralPrivateKey,
+        spendingPrivateKey
+      );
     }
   }
 
@@ -314,48 +345,77 @@ export class Stealth {
     // Normalize all keys to compressed format for consistency (Fluidkey approach)
     const normalizedViewingKey = this.normalizePublicKey(viewingPublicKey);
     const normalizedSpendingKey = this.normalizePublicKey(spendingPublicKey);
-    const normalizedEphemeralKey = this.normalizePublicKey(ephemeralWallet.signingKey.publicKey);
+    const normalizedEphemeralKey = this.normalizePublicKey(
+      ephemeralWallet.signingKey.publicKey
+    );
 
-    this.log('info', '[generateStealthAddress] Normalized keys:', {
+    this.log("info", "[generateStealthAddress] Normalized keys:", {
       viewing: normalizedViewingKey,
       spending: normalizedSpendingKey,
-      ephemeral: normalizedEphemeralKey
+      ephemeral: normalizedEphemeralKey,
     });
 
     // Step 1: Compute shared secret using ECDH (ephemeralPrivateKey * viewingPublicKey)
     // This follows the Fluidkey pattern of proper ECDH computation
-    const sharedSecret = ephemeralWallet.signingKey.computeSharedSecret(normalizedViewingKey);
+    const sharedSecret =
+      ephemeralWallet.signingKey.computeSharedSecret(normalizedViewingKey);
 
-    this.log('info', '[generateStealthAddress] Shared secret:', sharedSecret);
+    this.log("info", "[generateStealthAddress] Shared secret:", sharedSecret);
 
     // Step 2: Derive stealth private key using Fluidkey-inspired method
     // Hash the shared secret to get a scalar for point multiplication
     const hashedSharedSecret = ethers.keccak256(sharedSecret);
 
-    this.log('info', '[generateStealthAddress] Hashed shared secret:', hashedSharedSecret);
-
-    // Step 3: Create stealth address using proper elliptic curve arithmetic
-    // IMPORTANT: For stealth address generation, we should NEVER use the actual spending private key
-    // Instead, we derive a deterministic private key from the public key for consistency
-    // This ensures that the same inputs always produce the same stealth address
-    const derivedSpendingKey = this.getPrivateKeyFromPublicKey(normalizedSpendingKey);
-    const stealthPrivateKeyScalar = this.addPrivateKeys(
-      hashedSharedSecret,
-      derivedSpendingKey // Use derived key to match generation logic
+    this.log(
+      "info",
+      "[generateStealthAddress] Hashed shared secret:",
+      hashedSharedSecret
     );
 
-    this.log('info', '[generateStealthAddress] Stealth private key scalar:', stealthPrivateKeyScalar);
+    // Step 3: Create stealth address using proper elliptic curve arithmetic
+    // Use the actual spending private key if provided, otherwise derive from public key
+    let spendingKeyToUse: string;
+    if (spendingPrivateKey) {
+      // Use the actual spending private key
+      spendingKeyToUse = spendingPrivateKey;
+      this.log(
+        "info",
+        "[generateStealthAddress] Using provided spending private key"
+      );
+    } else {
+      // Fallback: derive a deterministic private key from the public key
+      spendingKeyToUse = this.getPrivateKeyFromPublicKey(normalizedSpendingKey);
+      this.log(
+        "info",
+        "[generateStealthAddress] Using derived spending private key from public key"
+      );
+    }
+
+    const stealthPrivateKeyScalar = this.addPrivateKeys(
+      hashedSharedSecret,
+      spendingKeyToUse
+    );
+
+    this.log(
+      "info",
+      "[generateStealthAddress] Stealth private key scalar:",
+      stealthPrivateKeyScalar
+    );
 
     // Create stealth wallet from derived private key
     const stealthWallet = new ethers.Wallet(stealthPrivateKeyScalar);
 
-    this.log('info', '[generateStealthAddress] Generated stealth address:', stealthWallet.address);
+    this.log(
+      "info",
+      "[generateStealthAddress] Generated stealth address:",
+      stealthWallet.address
+    );
 
     return {
       stealthAddress: stealthWallet.address,
       ephemeralPublicKey: normalizedEphemeralKey,
       recipientViewingPublicKey: normalizedViewingKey,
-      recipientSpendingPublicKey: normalizedSpendingKey
+      recipientSpendingPublicKey: normalizedSpendingKey,
     };
   }
 
@@ -369,13 +429,15 @@ export class Stealth {
     const k2 = BigInt(key2);
 
     // Secp256k1 curve order
-    const CURVE_ORDER = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141');
+    const CURVE_ORDER = BigInt(
+      "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141"
+    );
 
     // Add the keys modulo curve order
     const result = (k1 + k2) % CURVE_ORDER;
 
     // Convert back to hex string with proper padding
-    return '0x' + result.toString(16).padStart(64, '0');
+    return "0x" + result.toString(16).padStart(64, "0");
   }
 
   /**
@@ -385,7 +447,7 @@ export class Stealth {
   private getPrivateKeyFromPublicKey(publicKey: string): string {
     // Use a deterministic hash of the public key as a pseudo-private key
     // This ensures the same public key always produces the same "private key"
-    return ethers.keccak256(ethers.toUtf8Bytes('stealth_seed_' + publicKey));
+    return ethers.keccak256(ethers.toUtf8Bytes("stealth_seed_" + publicKey));
   }
 
   /**
@@ -404,12 +466,19 @@ export class Stealth {
   ): Promise<ethers.Wallet> {
     try {
       // Validate input parameters
-      if (!stealthAddress || !ephemeralPublicKey || !viewingPrivateKey || !spendingPrivateKey) {
-        throw new Error("All parameters are required: stealthAddress, ephemeralPublicKey, viewingPrivateKey, spendingPrivateKey");
+      if (
+        !stealthAddress ||
+        !ephemeralPublicKey ||
+        !viewingPrivateKey ||
+        !spendingPrivateKey
+      ) {
+        throw new Error(
+          "All parameters are required: stealthAddress, ephemeralPublicKey, viewingPrivateKey, spendingPrivateKey"
+        );
       }
 
       this.log("info", "Opening stealth address using Fluidkey method");
-      
+
       this.log("debug", "[OPEN] Params", {
         stealthAddress: normalizeHex(stealthAddress, 20),
         ephemeralPublicKey: normalizeHex(ephemeralPublicKey, 33),
@@ -418,7 +487,8 @@ export class Stealth {
       });
 
       // Ensure ephemeralPublicKey is normalized to compressed format before passing to Fluidkey
-      const normalizedEphemeralPublicKey = this.normalizePublicKey(ephemeralPublicKey);
+      const normalizedEphemeralPublicKey =
+        this.normalizePublicKey(ephemeralPublicKey);
 
       // Try using Fluidkey's generateStealthPrivateKey function
       try {
@@ -428,22 +498,39 @@ export class Stealth {
         });
 
         const stealthWallet = new ethers.Wallet(result.stealthPrivateKey);
-        
+
         // Verify the derived address matches the expected stealth address
-        if (stealthWallet.address.toLowerCase() !== stealthAddress.toLowerCase()) {
-          throw new Error(`Derived address ${stealthWallet.address} does not match expected stealth address ${stealthAddress}`);
+        if (
+          stealthWallet.address.toLowerCase() !== stealthAddress.toLowerCase()
+        ) {
+          throw new Error(
+            `Derived address ${stealthWallet.address} does not match expected stealth address ${stealthAddress}`
+          );
         }
 
-        this.log('info', '[openStealthAddress] Successfully opened stealth address using Fluidkey:', stealthWallet.address);
+        this.log(
+          "info",
+          "[openStealthAddress] Successfully opened stealth address using Fluidkey:",
+          stealthWallet.address
+        );
         return stealthWallet;
       } catch (fluidkeyError) {
-        this.log('warn', '[openStealthAddress] Fluidkey method failed, falling back to original:', fluidkeyError);
-        
+        this.log(
+          "warn",
+          "[openStealthAddress] Fluidkey method failed, falling back to original:",
+          fluidkeyError
+        );
+
         // Fallback to original implementation
-        return this.openStealthAddressOriginal(stealthAddress, ephemeralPublicKey, viewingPrivateKey, spendingPrivateKey);
+        return this.openStealthAddressOriginal(
+          stealthAddress,
+          ephemeralPublicKey,
+          viewingPrivateKey,
+          spendingPrivateKey
+        );
       }
     } catch (error) {
-      this.log('error', '[openStealthAddress] Error:', error);
+      this.log("error", "[openStealthAddress] Error:", error);
       throw error;
     }
   }
@@ -460,35 +547,62 @@ export class Stealth {
     // Normalize keys to compressed format for consistency (Fluidkey approach)
     const normalizedEphemeralKey = this.normalizePublicKey(ephemeralPublicKey);
 
-    this.log('info', '[openStealthAddress] Normalized ephemeral key:', normalizedEphemeralKey);
+    this.log(
+      "info",
+      "[openStealthAddress] Normalized ephemeral key:",
+      normalizedEphemeralKey
+    );
 
     // Step 1: Compute shared secret using ECDH (viewingPrivateKey * ephemeralPublicKey)
     const viewingWallet = new ethers.Wallet(viewingPrivateKey);
-    const sharedSecret = viewingWallet.signingKey.computeSharedSecret(normalizedEphemeralKey);
+    const sharedSecret = viewingWallet.signingKey.computeSharedSecret(
+      normalizedEphemeralKey
+    );
 
-    this.log('info', '[openStealthAddress] Shared secret:', sharedSecret);
+    this.log("info", "[openStealthAddress] Shared secret:", sharedSecret);
 
     // Step 2: Derive stealth private key using the same method as generation
     const hashedSharedSecret = ethers.keccak256(sharedSecret);
 
-    this.log('info', '[openStealthAddress] Hashed shared secret:', hashedSharedSecret);
+    this.log(
+      "info",
+      "[openStealthAddress] Hashed shared secret:",
+      hashedSharedSecret
+    );
 
     // Step 3: Derive the stealth private key by adding the shared secret to the spending key
-    const stealthPrivateKeyScalar = this.addPrivateKeys(hashedSharedSecret, spendingPrivateKey);
+    const stealthPrivateKeyScalar = this.addPrivateKeys(
+      hashedSharedSecret,
+      spendingPrivateKey
+    );
 
-    this.log('info', '[openStealthAddress] Stealth private key scalar:', stealthPrivateKeyScalar);
+    this.log(
+      "info",
+      "[openStealthAddress] Stealth private key scalar:",
+      stealthPrivateKeyScalar
+    );
 
     // Create wallet from derived private key
     const stealthWallet = new ethers.Wallet(stealthPrivateKeyScalar);
 
-    this.log('info', '[openStealthAddress] Derived stealth address:', stealthWallet.address);
+    this.log(
+      "info",
+      "[openStealthAddress] Derived stealth address:",
+      stealthWallet.address
+    );
 
     // Verify the derived address matches the expected stealth address
     if (stealthWallet.address.toLowerCase() !== stealthAddress.toLowerCase()) {
-      throw new Error(`Derived address ${stealthWallet.address} does not match expected stealth address ${stealthAddress}`);
+      throw new Error(
+        `Derived address ${stealthWallet.address} does not match expected stealth address ${stealthAddress}`
+      );
     }
 
-    this.log('info', '[openStealthAddress] Successfully opened stealth address:', stealthWallet.address);
+    this.log(
+      "info",
+      "[openStealthAddress] Successfully opened stealth address:",
+      stealthWallet.address
+    );
     return stealthWallet;
   }
 
@@ -538,4 +652,4 @@ export class Stealth {
 
 // Esporta la classe Stealth come StealthAddresses per compatibilità con i test aggiuntivi
 export { Stealth as StealthAddresses };
-export default Stealth; 
+export default Stealth;

@@ -98,11 +98,15 @@ export interface StealthPluginInterface extends BasePluginInterface {
    * Generate a new stealth address for a recipient
    * @param recipientViewingKey Recipient's viewing public key
    * @param recipientSpendingKey Recipient's spending public key
+   * @param ephemeralPrivateKey Optional ephemeral private key
+   * @param spendingPrivateKey Optional spending private key for deterministic generation
    * @returns Promise<StealthAddressResult>
    */
   generateStealthAddress(
     recipientViewingKey: string,
-    recipientSpendingKey: string
+    recipientSpendingKey: string,
+    ephemeralPrivateKey?: string,
+    spendingPrivateKey?: string
   ): Promise<StealthAddressResult>;
 
   /**
@@ -264,6 +268,45 @@ export interface StealthPluginInterface extends BasePluginInterface {
    * Sync notifications with payment state to recover missed payments
    */
   syncNotificationsWithState(): Promise<void>;
+
+  /**
+   * Withdraw a stealth payment
+   * @param stealthAddress The stealth address containing the payment
+   * @param acceptor The address to receive the withdrawn funds
+   * @param token The token address (use ETH_TOKEN_PLACEHOLDER for ETH)
+   * @param ephemeralPublicKey Optional ephemeral public key for ETH withdrawals
+   * @returns Promise<{txHash: string}>
+   */
+  withdrawStealthPayment(
+    stealthAddress: string,
+    acceptor: string,
+    token: string,
+    ephemeralPublicKey?: string
+  ): Promise<{ txHash: string }>;
+
+  /**
+   * Scan on-chain per ripopolare il database GunDB con pagamenti stealth da un blocco specifico
+   * @param fromBlock Blocco iniziale per lo scan (es. 8796157)
+   * @param toBlock Blocco finale per lo scan (opzionale, se non specificato usa l'ultimo blocco)
+   * @param stealthAddresses Array di indirizzi stealth da monitorare (opzionale, se non specificato usa le chiavi dell'utente)
+   * @returns Promise con statistiche dello scan
+   */
+  scanOnChainPayments(
+    fromBlock: number,
+    toBlock?: number,
+    stealthAddresses?: string[]
+  ): Promise<{
+    scannedBlocks: number;
+    foundPayments: number;
+    savedPayments: number;
+    errors: string[];
+  }>;
+
+  /**
+   * Forza la sincronizzazione anche dopo una eliminazione definitiva
+   * @param force Se true, ignora il timestamp dell'ultima eliminazione
+   */
+  forceSyncNotifications(force?: boolean): Promise<void>;
 }
 
 /**
