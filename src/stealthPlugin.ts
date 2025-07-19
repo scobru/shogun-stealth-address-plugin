@@ -52,6 +52,15 @@ export class StealthPlugin
   private signer: ethers.Signer | null = null;
   private contractManager: ContractManager;
 
+  // Payment state management
+  private paymentState: Map<
+    string,
+    StealthPaymentNotification & { status: string; txHash?: string }
+  > = new Map();
+  private paymentCallbacks: ((payment: StealthPaymentNotification) => void)[] =
+    [];
+  private isListening = false;
+
   constructor(config?: Partial<ContractConfig>) {
     super();
     this.stealth = new Stealth("info");
@@ -61,22 +70,37 @@ export class StealthPlugin
   initialize(core: any): void {
     super.initialize(core);
     this.gun = core.gun;
+    this.provider = core.provider;
+    this.signer = core.signer;
 
-    if (!core.gun) {
-      throw new Error("Gun instance required for stealth plugin");
+    if (!this.gun) {
+      throw new Error("Gun instance is required");
     }
 
-    // Initialize provider and contracts if available
-    if (core.provider) {
-      this.provider = core.provider;
-      this.signer = core.signer;
+    if (!this.provider) {
+      throw new Error("Provider is required");
+    }
+
+    if (!this.signer) {
+      throw new Error("Signer is required");
+    }
+
+    this.contractManager = new ContractManager();
+
+    // Initialize contracts if config is available
+    if (this.contractManager.getAvailableNetworks().length > 0) {
       this.initializeContracts();
     }
 
-    this.log(
-      "info",
-      "Stealth plugin initialized with Fluidkey integration and payment support"
-    );
+    // Load payment state and sync notifications
+    this.loadPaymentState().then(() => {
+      this.syncNotificationsWithState().then(() => {
+        // Start payment listener after sync
+        this.startPaymentListener();
+      });
+    });
+
+    this.log("info", "Stealth plugin initialized successfully");
   }
 
   /**
@@ -158,7 +182,7 @@ export class StealthPlugin
     this.signer = null;
   }
 
-  protected override assertInitialized(): void {
+  protected assertInitialized(): void {
     super.assertInitialized();
     if (!this.gun) {
       throw new Error("Gun instance not available");
@@ -178,20 +202,25 @@ export class StealthPlugin
     if (!gunUser.is) throw new Error("User not authenticated");
 
     const userPub = gunUser.is.pub;
+    this.log("info", `[saveKeysToGun] Saving keys for user: ${userPub}`);
 
     // Save private keys in user space
     await new Promise<void>((resolve, reject) => {
-      gunUser.get("stealth_keys").put(
-        {
-          viewingKey: keys.viewingKey.privateKey,
-          spendingKey: keys.spendingKey.privateKey,
-          timestamp: Date.now(),
-        },
-        (ack: any) => {
-          if (ack.err) reject(new Error(ack.err));
-          else resolve();
-        }
-      );
+      gunUser
+        .get("shogun")
+        .get("stealth_keys")
+        .put(
+          {
+            viewingKey: keys.viewingKey.privateKey,
+            spendingKey: keys.spendingKey.privateKey,
+            timestamp: Date.now(),
+          },
+          (ack: any) => {
+            this.log("info", `[saveKeysToGun] Private keys save ack:`, ack);
+            if (ack.err) reject(new Error(ack.err));
+            else resolve();
+          }
+        );
     });
 
     // Save public keys in public space
@@ -207,6 +236,7 @@ export class StealthPlugin
             timestamp: Date.now(),
           },
           (ack: any) => {
+            this.log("info", `[saveKeysToGun] Public keys save ack:`, ack);
             if (ack.err) reject(new Error(ack.err));
             else resolve();
           }
@@ -215,7 +245,7 @@ export class StealthPlugin
   }
 
   /**
-   * Retrieves stealth keys from Gun user space
+   * Gets stealth keys from Gun user space
    * @returns Promise<StealthKeys | null>
    */
   private async getKeysFromGun(): Promise<StealthKeys | null> {
@@ -227,7 +257,7 @@ export class StealthPlugin
 
     // Get private keys from user space
     const privateKeys = await new Promise<any>((resolve) => {
-      gunUser.get("stealth_keys").once(resolve);
+      gunUser.get("shogun").get("stealth_keys").once(resolve);
     });
 
     if (!privateKeys) return null;
@@ -266,6 +296,11 @@ export class StealthPlugin
     this.assertInitialized();
     if (!this.core.gun) throw new Error("Gun not available");
 
+    this.log(
+      "info",
+      `[getPublicStealthKeys] Looking up keys for: ${gunPublicKey}`
+    );
+
     const publicKeys = await new Promise<any>((resolve) => {
       this.core.gun
         .get("shogun")
@@ -274,8 +309,26 @@ export class StealthPlugin
         .once(resolve);
     });
 
-    if (!publicKeys) return null;
+    this.log("info", `[getPublicStealthKeys] Retrieved data:`, publicKeys);
 
+    if (!publicKeys) {
+      this.log(
+        "warn",
+        `[getPublicStealthKeys] No public keys found for: ${gunPublicKey}`
+      );
+      return null;
+    }
+
+    if (!publicKeys.viewingKey || !publicKeys.spendingKey) {
+      this.log(
+        "warn",
+        `[getPublicStealthKeys] Incomplete keys found:`,
+        publicKeys
+      );
+      return null;
+    }
+
+    this.log("info", `[getPublicStealthKeys] Keys found successfully`);
     return {
       viewingKey: publicKeys.viewingKey,
       spendingKey: publicKeys.spendingKey,
@@ -604,6 +657,182 @@ export class StealthPlugin
     this.assertInitialized();
 
     try {
+      // Debug: Check contract state
+      if (!this.paymentForwarderContract) {
+        throw new Error("PaymentForwarder contract not initialized");
+      }
+
+      const contractAddress = this.paymentForwarderContract.target;
+      this.log(
+        "info",
+        `[sendStealthPayment] Contract address: ${contractAddress}`
+      );
+
+      // Debug: Check current network
+      try {
+        const network = await this.provider!.getNetwork();
+        this.log(
+          "info",
+          `[sendStealthPayment] Current network: ${network.name} (chainId: ${network.chainId})`
+        );
+      } catch (error) {
+        this.log(
+          "warn",
+          `[sendStealthPayment] Could not get network info: ${error}`
+        );
+      }
+
+      // Debug: Check if contract exists at address
+      const code = await this.provider!.getCode(contractAddress);
+      if (code === "0x") {
+        throw new Error(`No contract deployed at address: ${contractAddress}`);
+      }
+      this.log(
+        "info",
+        `[sendStealthPayment] Contract code found at: ${contractAddress}`
+      );
+
+      // Debug: Check if contract has expected functions
+      try {
+        const hasToll =
+          await this.paymentForwarderContract.hasOwnProperty("toll");
+        const hasSendEth =
+          await this.paymentForwarderContract.hasOwnProperty("sendEth");
+        const hasSendToken =
+          await this.paymentForwarderContract.hasOwnProperty("sendToken");
+        this.log("info", `[sendStealthPayment] Contract functions check:`, {
+          hasToll: !!hasToll,
+          hasSendEth: !!hasSendEth,
+          hasSendToken: !!hasSendToken,
+        });
+      } catch (error) {
+        this.log(
+          "warn",
+          `[sendStealthPayment] Could not check contract functions: ${error}`
+        );
+      }
+
+      // Debug: Check contract name and interface
+      try {
+        const contractInterface = this.paymentForwarderContract.interface;
+        this.log(
+          "info",
+          `[sendStealthPayment] Contract interface available:`,
+          !!contractInterface
+        );
+      } catch (error) {
+        this.log(
+          "warn",
+          `[sendStealthPayment] Could not get contract interface: ${error}`
+        );
+      }
+
+      // Debug: Check contract owner
+      try {
+        const owner = await this.paymentForwarderContract.owner();
+        this.log("info", `[sendStealthPayment] Contract owner: ${owner}`);
+      } catch (error) {
+        this.log(
+          "warn",
+          `[sendStealthPayment] Could not get contract owner: ${error}`
+        );
+      }
+
+      // Debug: Check contract initialization
+      try {
+        const tollCollector =
+          await this.paymentForwarderContract.tollCollector();
+        const tollReceiver = await this.paymentForwarderContract.tollReceiver();
+        this.log("info", `[sendStealthPayment] Contract initialization:`, {
+          tollCollector: tollCollector,
+          tollReceiver: tollReceiver,
+        });
+      } catch (error) {
+        this.log(
+          "warn",
+          `[sendStealthPayment] Could not get contract initialization: ${error}`
+        );
+      }
+
+      // Debug: Check toll with error handling
+      let toll: bigint;
+      try {
+        toll = await this.paymentForwarderContract.toll();
+        this.log(
+          "info",
+          `[sendStealthPayment] Contract toll: ${toll.toString()}`
+        );
+      } catch (error) {
+        this.log(
+          "error",
+          `[sendStealthPayment] Error calling toll(): ${error}`
+        );
+
+        // Try to get more information about the error
+        if (error instanceof Error) {
+          this.log("error", `[sendStealthPayment] Error details:`, {
+            message: error.message,
+            name: error.name,
+            stack: error.stack,
+          });
+        }
+
+        // Check if it's a contract call issue
+        try {
+          const rawCall = await this.provider!.call({
+            to: contractAddress,
+            data: "0x3d3d3d3d", // Invalid function selector to test if contract responds
+          });
+          this.log(
+            "info",
+            `[sendStealthPayment] Contract responds to invalid calls: ${rawCall}`
+          );
+        } catch (callError) {
+          this.log(
+            "info",
+            `[sendStealthPayment] Contract does not respond to invalid calls: ${callError}`
+          );
+        }
+
+        throw new Error(`Contract toll() call failed: ${error}`);
+      }
+
+      // Debug: Check signer balance
+      if (this.signer) {
+        try {
+          const signerAddress = await this.signer.getAddress();
+          const balance = await this.provider!.getBalance(signerAddress);
+          this.log(
+            "info",
+            `[sendStealthPayment] Signer address: ${signerAddress}`
+          );
+          this.log(
+            "info",
+            `[sendStealthPayment] Signer balance: ${balance.toString()} wei`
+          );
+
+          if (token === ETH_TOKEN_PLACEHOLDER) {
+            const requiredAmount = BigInt(amount) + toll;
+            if (balance < requiredAmount) {
+              throw new Error(
+                `Insufficient balance. Required: ${requiredAmount.toString()} wei, Available: ${balance.toString()} wei`
+              );
+            }
+          } else {
+            if (balance < toll) {
+              throw new Error(
+                `Insufficient balance for toll. Required: ${toll.toString()} wei, Available: ${balance.toString()} wei`
+              );
+            }
+          }
+        } catch (error) {
+          this.log(
+            "warn",
+            `[sendStealthPayment] Could not check signer balance: ${error}`
+          );
+        }
+      }
+
       // 1. Get recipient's stealth keys from GunDB
       const recipientKeys = await this.getPublicStealthKeys(recipientGunPub);
       if (!recipientKeys) {
@@ -623,17 +852,33 @@ export class StealthPlugin
       );
 
       // 4. Extract pkx from ephemeral public key
-      const pkx = stealthResult.ephemeralPublicKey.slice(2, 66); // Remove 0x and get x coordinate
+      const rawPkx = stealthResult.ephemeralPublicKey.slice(2, 66); // Remove 0x and get x coordinate
+      const pkx = "0x" + rawPkx; // Add 0x prefix for BytesLike compatibility
+
+      this.log("info", `[sendStealthPayment] PKX formatting:`, {
+        ephemeralPublicKey: stealthResult.ephemeralPublicKey,
+        rawPkx: rawPkx,
+        finalPkx: pkx,
+        pkxLength: pkx.length,
+        expectedLength: 66, // 0x + 64 hex chars
+      });
 
       // 5. Send payment on-chain
       let txHash: string;
 
       if (token === ETH_TOKEN_PLACEHOLDER) {
         // Send ETH
-        const toll = await this.paymentForwarderContract!.toll();
-        const totalAmount = BigInt(amount) + BigInt(toll);
+        const totalAmount = BigInt(amount) + toll;
 
-        const tx = await this.paymentForwarderContract!.sendEth(
+        this.log("info", `[sendStealthPayment] Sending ETH payment:`, {
+          stealthAddress: stealthResult.stealthAddress,
+          amount: amount,
+          toll: toll.toString(),
+          totalAmount: totalAmount.toString(),
+          pkx: pkx,
+        });
+
+        const tx = await this.paymentForwarderContract.sendEth(
           stealthResult.stealthAddress,
           toll,
           pkx,
@@ -643,9 +888,15 @@ export class StealthPlugin
         txHash = tx.hash;
       } else {
         // Send token
-        const toll = await this.paymentForwarderContract!.toll();
+        this.log("info", `[sendStealthPayment] Sending token payment:`, {
+          stealthAddress: stealthResult.stealthAddress,
+          token: token,
+          amount: amount,
+          toll: toll.toString(),
+          pkx: pkx,
+        });
 
-        const tx = await this.paymentForwarderContract!.sendToken(
+        const tx = await this.paymentForwarderContract.sendToken(
           stealthResult.stealthAddress,
           token,
           amount,
@@ -695,14 +946,32 @@ export class StealthPlugin
     recipientGunPub: string,
     notification: StealthPaymentNotification
   ): Promise<void> {
+    this.assertInitialized();
+
+    this.log(
+      "info",
+      `[sendStealthNotification] Sending notification to: ${recipientGunPub}`
+    );
+
     return new Promise((resolve, reject) => {
       this.gun
+        .get("shogun")
         .get("stealth_payments")
         .get(recipientGunPub)
+        .get(notification.stealthAddress)
         .put(notification, (ack: any) => {
           if (ack.err) {
+            this.log(
+              "error",
+              `[sendStealthNotification] Error sending notification:`,
+              ack.err
+            );
             reject(new Error(ack.err));
           } else {
+            this.log(
+              "info",
+              `[sendStealthNotification] Notification sent successfully`
+            );
             resolve();
           }
         });
@@ -723,14 +992,206 @@ export class StealthPlugin
       throw new Error("User not authenticated");
     }
 
+    // Add callback to list
+    this.paymentCallbacks.push(callback);
+
+    // Load existing payment state if not already loaded
+    if (this.paymentState.size === 0) {
+      this.loadPaymentState();
+    }
+
+    // Start listening if not already listening
+    if (!this.isListening) {
+      this.startPaymentListener();
+    }
+
+    this.log(
+      "info",
+      `[onStealthPayment] Callback registered, total callbacks: ${this.paymentCallbacks.length}`
+    );
+  }
+
+  /**
+   * Load payment state from GunDB
+   */
+  private async loadPaymentState(): Promise<void> {
+    const userPub = this.gun.user().is.pub;
+    if (!userPub) return;
+
     this.gun
+      .get("shogun")
+      .get("stealth_payment_state")
+      .get(userPub)
+      .once((data: any) => {
+        if (data && Array.isArray(data)) {
+          this.log(
+            "info",
+            `[loadPaymentState] Loading ${data.length} payments`
+          );
+          data.forEach(
+            (
+              payment: StealthPaymentNotification & {
+                status: string;
+                txHash?: string;
+              }
+            ) => {
+              const paymentId = this.getPaymentId(payment);
+              this.paymentState.set(paymentId, payment);
+            }
+          );
+        }
+      });
+  }
+
+  /**
+   * Start listening for new payments
+   */
+  private startPaymentListener(): void {
+    const userPub = this.gun.user().is.pub;
+    if (!userPub) return;
+
+    this.isListening = true;
+    this.log(
+      "info",
+      `[startPaymentListener] Starting payment listener for user: ${userPub}`
+    );
+
+    this.gun
+      .get("shogun")
       .get("stealth_payments")
       .get(userPub)
       .on((data: any) => {
+        this.log("info", `[startPaymentListener] Received data:`, data);
         if (data && typeof data === "object" && data.stealthAddress) {
-          callback(data as StealthPaymentNotification);
+          this.log(
+            "info",
+            `[startPaymentListener] Valid payment notification received`
+          );
+          this.addPaymentToState(data as StealthPaymentNotification);
+        } else {
+          this.log(
+            "warn",
+            `[startPaymentListener] Invalid data received:`,
+            data
+          );
         }
       });
+  }
+
+  /**
+   * Restart payment listener (useful after page refresh)
+   */
+  async restartPaymentListener(): Promise<void> {
+    this.log("info", `[restartPaymentListener] Restarting payment listener`);
+
+    // Reset listening state
+    this.isListening = false;
+
+    // Reload payment state
+    await this.loadPaymentState();
+
+    // Sync notifications with state to recover missed payments
+    await this.syncNotificationsWithState();
+
+    // Restart listener
+    this.startPaymentListener();
+
+    this.log("info", `[restartPaymentListener] Payment listener restarted`);
+  }
+
+  /**
+   * Sync notifications with payment state to recover missed payments
+   */
+  async syncNotificationsWithState(): Promise<void> {
+    const userPub = this.gun.user().is.pub;
+    if (!userPub) return;
+
+    this.log(
+      "info",
+      `[syncNotificationsWithState] Syncing notifications with state`
+    );
+
+    return new Promise((resolve) => {
+      this.gun
+        .get("shogun")
+        .get("stealth_payments")
+        .get(userPub)
+        .once((data: any) => {
+          if (data && typeof data === "object") {
+            const notifications: StealthPaymentNotification[] = Object.values(
+              data
+            )
+              .filter(
+                (item: any) =>
+                  item &&
+                  typeof item === "object" &&
+                  item.stealthAddress &&
+                  item.amount
+              )
+              .map((item: any) => item as StealthPaymentNotification);
+
+            this.log(
+              "info",
+              `[syncNotificationsWithState] Found ${notifications.length} notifications`
+            );
+
+            let recoveredCount = 0;
+            notifications.forEach((notification) => {
+              const paymentId = this.getPaymentId(notification);
+
+              // Check if this notification is already in our state
+              if (!this.paymentState.has(paymentId)) {
+                this.log(
+                  "info",
+                  `[syncNotificationsWithState] Recovering missed payment: ${paymentId}`
+                );
+                this.addPaymentToState(notification);
+                recoveredCount++;
+              }
+            });
+
+            this.log(
+              "info",
+              `[syncNotificationsWithState] Recovered ${recoveredCount} missed payments`
+            );
+
+            // Save updated state if we recovered payments
+            if (recoveredCount > 0) {
+              const allPayments = Array.from(this.paymentState.values());
+              this.savePaymentState(allPayments).catch((error) => {
+                this.log(
+                  "error",
+                  `[syncNotificationsWithState] Error saving state:`,
+                  error
+                );
+              });
+            }
+          }
+          resolve();
+        });
+    });
+  }
+
+  /**
+   * Check if payment listener is active
+   */
+  isPaymentListenerActive(): boolean {
+    return this.isListening;
+  }
+
+  /**
+   * Get listener status information
+   */
+  getListenerStatus(): {
+    isListening: boolean;
+    callbackCount: number;
+    paymentCount: number;
+  } {
+    return {
+      isListening: this.isListening,
+      callbackCount: this.paymentCallbacks.length,
+      paymentCount: this.paymentState.size,
+    };
   }
 
   /**
@@ -807,20 +1268,43 @@ export class StealthPlugin
       throw new Error("User not authenticated");
     }
 
+    this.log(
+      "info",
+      `[getStealthPaymentHistory] Getting payments for user: ${userPub}`
+    );
+
     return new Promise((resolve) => {
       this.gun
+        .get("shogun")
         .get("stealth_payments")
         .get(userPub)
         .once((data: any) => {
+          this.log(
+            "info",
+            `[getStealthPaymentHistory] Raw data from GunDB:`,
+            data
+          );
+
           if (data && typeof data === "object") {
+            this.log(
+              "info",
+              `[getStealthPaymentHistory] Data is object, processing...`
+            );
+
             const payments: StealthPaymentNotification[] = Object.values(data)
-              .filter(
-                (item: any) =>
+              .filter((item: any) => {
+                const isValid =
                   item &&
                   typeof item === "object" &&
                   item.stealthAddress &&
-                  item.amount
-              )
+                  item.amount;
+                this.log(
+                  "info",
+                  `[getStealthPaymentHistory] Item validation:`,
+                  { item, isValid }
+                );
+                return isValid;
+              })
               .map((item: any) => item as StealthPaymentNotification)
               .sort(
                 (
@@ -828,11 +1312,329 @@ export class StealthPlugin
                   b: StealthPaymentNotification
                 ) => b.timestamp - a.timestamp
               );
+
+            this.log(
+              "info",
+              `[getStealthPaymentHistory] Processed payments:`,
+              payments
+            );
             resolve(payments);
           } else {
+            this.log(
+              "info",
+              `[getStealthPaymentHistory] No data or invalid data:`,
+              data
+            );
             resolve([]);
           }
         });
     });
+  }
+
+  /**
+   * Get payment state with status tracking
+   * @returns Promise with payment state including status
+   */
+  async getPaymentState(): Promise<
+    Array<StealthPaymentNotification & { status: string; txHash?: string }>
+  > {
+    this.assertInitialized();
+
+    const userPub = this.gun.user().is.pub;
+    if (!userPub) {
+      throw new Error("User not authenticated");
+    }
+
+    return new Promise((resolve) => {
+      this.gun
+        .get("stealth_payment_state")
+        .get(userPub)
+        .once((data: any) => {
+          if (data && Array.isArray(data)) {
+            this.log("info", `[getPaymentState] Loaded payment state:`, data);
+            resolve(data);
+          } else {
+            this.log("info", `[getPaymentState] No payment state found`);
+            resolve([]);
+          }
+        });
+    });
+  }
+
+  /**
+   * Save payment state to GunDB
+   * @param payments Array of payments with status
+   */
+  private async savePaymentState(
+    payments: Array<
+      StealthPaymentNotification & { status: string; txHash?: string }
+    >
+  ): Promise<void> {
+    const userPub = this.gun.user().is.pub;
+    if (!userPub) return;
+
+    this.log("info", `[savePaymentState] Saving ${payments.length} payments`);
+
+    return new Promise((resolve, reject) => {
+      this.gun
+        .get("shogun")
+        .get("stealth_payment_state")
+        .get(userPub)
+        .put(payments, (ack: any) => {
+          if (ack.err) {
+            this.log(
+              "error",
+              `[savePaymentState] Error saving state:`,
+              ack.err
+            );
+            reject(new Error(ack.err));
+          } else {
+            this.log("info", `[savePaymentState] State saved successfully`);
+            resolve();
+          }
+        });
+    });
+  }
+
+  /**
+   * Generate unique payment ID
+   * @param payment Payment notification
+   * @returns Unique ID
+   */
+  private getPaymentId(payment: StealthPaymentNotification): string {
+    return `${payment.stealthAddress}_${payment.timestamp}`;
+  }
+
+  /**
+   * Check if payment already exists
+   * @param payment Payment notification
+   * @returns True if payment exists
+   */
+  private isPaymentDuplicate(payment: StealthPaymentNotification): boolean {
+    const paymentId = this.getPaymentId(payment);
+    return this.paymentState.has(paymentId);
+  }
+
+  /**
+   * Add payment to state and notify callbacks
+   * @param payment Payment notification
+   */
+  private addPaymentToState(payment: StealthPaymentNotification): void {
+    const paymentId = this.getPaymentId(payment);
+
+    if (this.isPaymentDuplicate(payment)) {
+      this.log(
+        "info",
+        `[addPaymentToState] Payment already exists: ${paymentId}`
+      );
+      return;
+    }
+
+    // Add default status
+    const paymentWithStatus = { ...payment, status: "pending" };
+    this.paymentState.set(paymentId, paymentWithStatus);
+    this.log("info", `[addPaymentToState] Added new payment: ${paymentId}`);
+
+    // Notify all callbacks
+    this.paymentCallbacks.forEach((callback) => {
+      try {
+        callback(payment);
+      } catch (error) {
+        this.log("error", `[addPaymentToState] Callback error:`, error);
+      }
+    });
+  }
+
+  /**
+   * Update payment status
+   * @param stealthAddress Stealth address
+   * @param timestamp Payment timestamp
+   * @param status New status
+   * @param txHash Optional transaction hash
+   */
+  async updatePaymentStatus(
+    stealthAddress: string,
+    timestamp: number,
+    status: string,
+    txHash?: string
+  ): Promise<void> {
+    const paymentId = `${stealthAddress}_${timestamp}`;
+    const payment = this.paymentState.get(paymentId);
+
+    if (!payment) {
+      this.log("warn", `[updatePaymentStatus] Payment not found: ${paymentId}`);
+      return;
+    }
+
+    const updatedPayment = { ...payment, status, txHash };
+    this.paymentState.set(paymentId, updatedPayment);
+
+    // Save to GunDB
+    const allPayments = Array.from(this.paymentState.values());
+    await this.savePaymentState(allPayments);
+
+    this.log(
+      "info",
+      `[updatePaymentStatus] Updated payment ${paymentId} to status: ${status}`
+    );
+  }
+
+  /**
+   * Clear processed payments
+   * @returns Number of payments cleared
+   */
+  async clearProcessedPayments(): Promise<number> {
+    const pendingPayments = Array.from(this.paymentState.values()).filter(
+      (payment) => payment.status !== "claimed"
+    );
+
+    this.paymentState.clear();
+    pendingPayments.forEach((payment) => {
+      const paymentId = this.getPaymentId(payment);
+      this.paymentState.set(paymentId, payment);
+    });
+
+    await this.savePaymentState(Array.from(this.paymentState.values()));
+
+    const clearedCount = this.paymentState.size - pendingPayments.length;
+    this.log(
+      "info",
+      `[clearProcessedPayments] Cleared ${clearedCount} processed payments`
+    );
+
+    return clearedCount;
+  }
+
+  /**
+   * Get all payments with their current state
+   * @returns Array of payments with status
+   */
+  async getAllPayments(): Promise<
+    Array<StealthPaymentNotification & { status: string; txHash?: string }>
+  > {
+    // Load state if not loaded
+    if (this.paymentState.size === 0) {
+      await this.loadPaymentState();
+    }
+
+    return Array.from(this.paymentState.values());
+  }
+
+  /**
+   * Get pending payments only
+   * @returns Array of pending payments
+   */
+  async getPendingPayments(): Promise<
+    Array<StealthPaymentNotification & { status: string; txHash?: string }>
+  > {
+    const allPayments = await this.getAllPayments();
+    return allPayments.filter((payment) => payment.status === "pending");
+  }
+
+  /**
+   * Get claimed payments only
+   * @returns Array of claimed payments
+   */
+  async getClaimedPayments(): Promise<
+    Array<StealthPaymentNotification & { status: string; txHash?: string }>
+  > {
+    const allPayments = await this.getAllPayments();
+    return allPayments.filter((payment) => payment.status === "claimed");
+  }
+
+  /**
+   * Force remove a specific payment (for compatibility issues)
+   * @param stealthAddress Stealth address of the payment
+   * @param timestamp Timestamp of the payment
+   * @returns True if payment was removed
+   */
+  async forceRemovePayment(
+    stealthAddress: string,
+    timestamp: number
+  ): Promise<boolean> {
+    const paymentId = `${stealthAddress}_${timestamp}`;
+    const wasRemoved = this.paymentState.delete(paymentId);
+
+    if (wasRemoved) {
+      // Save updated state to GunDB
+      const allPayments = Array.from(this.paymentState.values());
+      await this.savePaymentState(allPayments);
+
+      this.log(
+        "info",
+        `[forceRemovePayment] Forced removal of payment: ${paymentId}`
+      );
+    } else {
+      this.log("warn", `[forceRemovePayment] Payment not found: ${paymentId}`);
+    }
+
+    return wasRemoved;
+  }
+
+  /**
+   * Force remove multiple payments by stealth address
+   * @param stealthAddress Stealth address to remove all payments for
+   * @returns Number of payments removed
+   */
+  async forceRemovePaymentsByAddress(stealthAddress: string): Promise<number> {
+    let removedCount = 0;
+    const paymentsToRemove: string[] = [];
+
+    // Find all payments for this address
+    for (const [paymentId, payment] of this.paymentState.entries()) {
+      if (payment.stealthAddress === stealthAddress) {
+        paymentsToRemove.push(paymentId);
+      }
+    }
+
+    // Remove them
+    paymentsToRemove.forEach((paymentId) => {
+      if (this.paymentState.delete(paymentId)) {
+        removedCount++;
+      }
+    });
+
+    if (removedCount > 0) {
+      // Save updated state to GunDB
+      const allPayments = Array.from(this.paymentState.values());
+      await this.savePaymentState(allPayments);
+
+      this.log(
+        "info",
+        `[forceRemovePaymentsByAddress] Removed ${removedCount} payments for address: ${stealthAddress}`
+      );
+    }
+
+    return removedCount;
+  }
+
+  /**
+   * Get payment by stealth address and timestamp
+   * @param stealthAddress Stealth address
+   * @param timestamp Payment timestamp
+   * @returns Payment if found, null otherwise
+   */
+  async getPayment(
+    stealthAddress: string,
+    timestamp: number
+  ): Promise<
+    (StealthPaymentNotification & { status: string; txHash?: string }) | null
+  > {
+    const paymentId = `${stealthAddress}_${timestamp}`;
+    return this.paymentState.get(paymentId) || null;
+  }
+
+  /**
+   * Check if a payment exists
+   * @param stealthAddress Stealth address
+   * @param timestamp Payment timestamp
+   * @returns True if payment exists
+   */
+  async hasPayment(
+    stealthAddress: string,
+    timestamp: number
+  ): Promise<boolean> {
+    const paymentId = `${stealthAddress}_${timestamp}`;
+    return this.paymentState.has(paymentId);
   }
 }

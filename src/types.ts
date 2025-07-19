@@ -150,6 +150,115 @@ export interface StealthPluginInterface extends BasePluginInterface {
    * Aggiunge o aggiorna la configurazione di una rete
    */
   setNetworkConfig(networkName: string, config: NetworkConfig): void;
+
+  /**
+   * Send a stealth payment
+   */
+  sendStealthPayment(
+    recipientGunPub: string,
+    amount: string,
+    token?: string,
+    message?: string
+  ): Promise<{
+    txHash: string;
+    stealthAddress: string;
+    ephemeralPublicKey: string;
+  }>;
+
+  /**
+   * Listen for stealth payment notifications
+   */
+  onStealthPayment(
+    callback: (payment: StealthPaymentNotification) => void
+  ): void;
+
+  /**
+   * Get all payments with their current state
+   */
+  getAllPayments(): Promise<
+    Array<StealthPaymentNotification & { status: string; txHash?: string }>
+  >;
+
+  /**
+   * Get pending payments only
+   */
+  getPendingPayments(): Promise<
+    Array<StealthPaymentNotification & { status: string; txHash?: string }>
+  >;
+
+  /**
+   * Get claimed payments only
+   */
+  getClaimedPayments(): Promise<
+    Array<StealthPaymentNotification & { status: string; txHash?: string }>
+  >;
+
+  /**
+   * Update payment status
+   */
+  updatePaymentStatus(
+    stealthAddress: string,
+    timestamp: number,
+    status: string,
+    txHash?: string
+  ): Promise<void>;
+
+  /**
+   * Clear processed payments
+   */
+  clearProcessedPayments(): Promise<number>;
+
+  /**
+   * Force remove a specific payment (for compatibility issues)
+   */
+  forceRemovePayment(
+    stealthAddress: string,
+    timestamp: number
+  ): Promise<boolean>;
+
+  /**
+   * Force remove multiple payments by stealth address
+   */
+  forceRemovePaymentsByAddress(stealthAddress: string): Promise<number>;
+
+  /**
+   * Get payment by stealth address and timestamp
+   */
+  getPayment(
+    stealthAddress: string,
+    timestamp: number
+  ): Promise<
+    (StealthPaymentNotification & { status: string; txHash?: string }) | null
+  >;
+
+  /**
+   * Check if a payment exists
+   */
+  hasPayment(stealthAddress: string, timestamp: number): Promise<boolean>;
+
+  /**
+   * Restart payment listener (useful after page refresh)
+   */
+  restartPaymentListener(): Promise<void>;
+
+  /**
+   * Check if payment listener is active
+   */
+  isPaymentListenerActive(): boolean;
+
+  /**
+   * Get listener status information
+   */
+  getListenerStatus(): {
+    isListening: boolean;
+    callbackCount: number;
+    paymentCount: number;
+  };
+
+  /**
+   * Sync notifications with payment state to recover missed payments
+   */
+  syncNotificationsWithState(): Promise<void>;
 }
 
 /**
