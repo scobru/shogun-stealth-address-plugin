@@ -1020,64 +1020,82 @@ export class StealthPlugin
 
     return new Promise((resolve) => {
       try {
+        // Usa un timeout per evitare blocchi infiniti
+        const timeout = setTimeout(() => {
+          this.log("warn", `[loadPaymentState] Timeout loading payment state`);
+          resolve();
+        }, 10000);
+
         this.gun
           .get("shogun")
           .get("stealth_payment_state")
           .get(userPub)
           .once((data: any) => {
+            clearTimeout(timeout);
             try {
-              if (data && Array.isArray(data)) {
-                this.log(
-                  "info",
-                  `[loadPaymentState] Loading ${data.length} payments`
-                );
-                data.forEach(
-                  (
-                    payment: StealthPaymentNotification & {
-                      status: string;
-                      txHash?: string;
-                    }
-                  ) => {
-                    try {
-                      if (
-                        payment &&
-                        typeof payment === "object" &&
-                        payment.stealthAddress
-                      ) {
-                        const paymentId = this.getPaymentId(payment);
-                        this.paymentState.set(paymentId, payment);
+              // Verifica che i dati siano validi prima di processarli
+              if (data && typeof data === "object" && !data._) {
+                if (Array.isArray(data)) {
+                  this.log(
+                    "info",
+                    `[loadPaymentState] Loading ${data.length} payments from array`
+                  );
+                  data.forEach(
+                    (
+                      payment: StealthPaymentNotification & {
+                        status: string;
+                        txHash?: string;
                       }
+                    ) => {
+                      try {
+                        if (
+                          payment &&
+                          typeof payment === "object" &&
+                          payment.stealthAddress
+                        ) {
+                          const paymentId = this.getPaymentId(payment);
+                          this.paymentState.set(paymentId, payment);
+                        }
+                      } catch (paymentError) {
+                        this.log(
+                          "warn",
+                          `[loadPaymentState] Error processing payment:`,
+                          paymentError
+                        );
+                      }
+                    }
+                  );
+                } else {
+                  // Handle case where data is an object instead of array
+                  this.log(
+                    "info",
+                    `[loadPaymentState] Converting object data to array`
+                  );
+                  const paymentsArray = Object.values(data).filter(
+                    (item: any) =>
+                      item &&
+                      typeof item === "object" &&
+                      item.stealthAddress &&
+                      !item._
+                  );
+                  paymentsArray.forEach((payment: any) => {
+                    try {
+                      const paymentId = this.getPaymentId(payment);
+                      this.paymentState.set(paymentId, payment);
                     } catch (paymentError) {
                       this.log(
                         "warn",
-                        `[loadPaymentState] Error processing payment:`,
+                        `[loadPaymentState] Error processing payment from object:`,
                         paymentError
                       );
                     }
-                  }
-                );
-              } else if (data && typeof data === "object") {
-                // Handle case where data is an object instead of array
+                  });
+                }
+              } else {
                 this.log(
                   "info",
-                  `[loadPaymentState] Converting object data to array`
+                  `[loadPaymentState] No valid data found or Gun metadata`
                 );
-                const paymentsArray = Object.values(data).filter(
-                  (item: any) =>
-                    item && typeof item === "object" && item.stealthAddress
-                );
-                paymentsArray.forEach((payment: any) => {
-                  try {
-                    const paymentId = this.getPaymentId(payment);
-                    this.paymentState.set(paymentId, payment);
-                  } catch (paymentError) {
-                    this.log(
-                      "warn",
-                      `[loadPaymentState] Error processing payment from object:`,
-                      paymentError
-                    );
-                  }
-                });
               }
             } catch (dataError) {
               this.log(
@@ -1109,58 +1127,156 @@ export class StealthPlugin
     );
 
     try {
-      this.gun
-        .get("shogun")
-        .get("stealth_payments")
-        .get(userPub)
-        .on((data: any) => {
-          try {
-            this.log("info", `[startPaymentListener] Received data:`, data);
+      // Usa il sistema di eventi centralizzato di ShogunCore se disponibile
+      if (this.core && this.core.on) {
+        this.log(
+          "info",
+          `[startPaymentListener] Using ShogunCore event system`
+        );
 
-            // Ignora dati non validi o vuoti
-            if (!data || typeof data !== "object") {
-              this.log(
-                "warn",
-                `[startPaymentListener] Invalid data type:`,
-                typeof data
-              );
-              return;
-            }
-
-            // Ignora i metadati Gun
-            if (data._) {
-              this.log("debug", `[startPaymentListener] Ignoring Gun metadata`);
-              return;
-            }
-
-            // Verifica se è un oggetto con stealthAddress valido
-            if (
-              data.stealthAddress &&
-              typeof data.stealthAddress === "string"
-            ) {
-              this.log(
-                "info",
-                `[startPaymentListener] Valid payment notification received`
-              );
-              this.addPaymentToState(data as StealthPaymentNotification);
-            } else {
-              this.log(
-                "warn",
-                `[startPaymentListener] Invalid data structure:`,
-                data
-              );
-            }
-          } catch (dataError) {
-            this.log(
-              "error",
-              `[startPaymentListener] Error processing data:`,
-              dataError
-            );
-          }
+        // Ascolta gli eventi Gun attraverso il sistema centralizzato
+        this.core.on("gun:put", (data: any) => {
+          this.handleGunData(data, "put");
         });
+
+        this.core.on("gun:get", (data: any) => {
+          this.handleGunData(data, "get");
+        });
+
+        this.core.on("gun:set", (data: any) => {
+          this.handleGunData(data, "set");
+        });
+
+        this.core.on("gun:remove", (data: any) => {
+          this.handleGunData(data, "remove");
+        });
+
+        // Ascolta anche gli eventi peer per debugging
+        this.core.on("gun:peer:connect", (data: any) => {
+          this.log("debug", `[startPaymentListener] Peer connected:`, data);
+        });
+
+        this.core.on("gun:peer:disconnect", (data: any) => {
+          this.log("debug", `[startPaymentListener] Peer disconnected:`, data);
+        });
+
+        // Setup RxJS tracking se disponibile
+        this.setupRxJSTracking();
+      } else {
+        // Fallback al metodo diretto se il core non è disponibile
+        this.log(
+          "warn",
+          `[startPaymentListener] ShogunCore not available, using direct Gun access`
+        );
+        this.setupDirectGunListener();
+      }
     } catch (gunError) {
       this.log("error", `[startPaymentListener] Gun error:`, gunError);
       this.isListening = false;
+    }
+  }
+
+  private setupDirectGunListener(): void {
+    const userPub = this.gun.user().is.pub;
+    if (!userPub) return;
+
+    this.gun
+      .get("shogun")
+      .get("stealth_payments")
+      .get(userPub)
+      .on((data: any) => {
+        this.handleGunData(data, "direct");
+      });
+  }
+
+  private handleGunData(data: any, source: string): void {
+    try {
+      this.log("debug", `[handleGunData] Received data from ${source}:`, data);
+
+      // Ignora dati non validi o vuoti
+      if (!data || typeof data !== "object") {
+        this.log(
+          "warn",
+          `[handleGunData] Invalid data type from ${source}:`,
+          typeof data
+        );
+        return;
+      }
+
+      // Ignora i metadati Gun
+      if (data._) {
+        this.log(
+          "debug",
+          `[handleGunData] Ignoring Gun metadata from ${source}`
+        );
+        return;
+      }
+
+      // Filtra le chiavi per escludere timestamp numerici e altri dati non validi
+      const validKeys = Object.keys(data).filter((key) => {
+        // Ignora chiavi che sono numeri (timestamp)
+        if (!isNaN(Number(key))) {
+          this.log(
+            "debug",
+            `[handleGunData] Ignoring numeric key from ${source}: ${key}`
+          );
+          return false;
+        }
+
+        // Ignora chiavi che iniziano con caratteri speciali
+        if (key.startsWith("_") || key.startsWith("#") || key.startsWith(">")) {
+          this.log(
+            "debug",
+            `[handleGunData] Ignoring special key from ${source}: ${key}`
+          );
+          return false;
+        }
+
+        // Verifica che il valore sia un oggetto valido
+        const value = data[key];
+        if (!value || typeof value !== "object" || value._) {
+          this.log(
+            "debug",
+            `[handleGunData] Ignoring invalid value for key from ${source}: ${key}`
+          );
+          return false;
+        }
+
+        return true;
+      });
+
+      // Processa solo le chiavi valide
+      for (const key of validKeys) {
+        const item = data[key];
+
+        // Verifica se è un oggetto con stealthAddress valido
+        if (
+          item &&
+          typeof item === "object" &&
+          item.stealthAddress &&
+          typeof item.stealthAddress === "string" &&
+          item.amount &&
+          !item._ // Esclude i metadati Gun
+        ) {
+          this.log(
+            "info",
+            `[handleGunData] Valid payment notification received from ${source} for key: ${key}`
+          );
+          this.addPaymentToState(item as StealthPaymentNotification);
+        } else {
+          this.log(
+            "warn",
+            `[handleGunData] Invalid data structure from ${source} for key ${key}:`,
+            item
+          );
+        }
+      }
+    } catch (dataError) {
+      this.log(
+        "error",
+        `[handleGunData] Error processing data from ${source}:`,
+        dataError
+      );
     }
   }
 
@@ -1206,15 +1322,44 @@ export class StealthPlugin
           .once((data: any) => {
             try {
               if (data && typeof data === "object") {
+                // Filtra le chiavi per escludere timestamp numerici e altri dati non validi
+                const validKeys = Object.keys(data).filter((key) => {
+                  // Ignora chiavi che sono numeri (timestamp)
+                  if (!isNaN(Number(key))) {
+                    this.log(
+                      "debug",
+                      `[syncNotificationsWithState] Ignoring numeric key: ${key}`
+                    );
+                    return false;
+                  }
+
+                  // Ignora chiavi che iniziano con caratteri speciali
+                  if (
+                    key.startsWith("_") ||
+                    key.startsWith("#") ||
+                    key.startsWith(">")
+                  ) {
+                    this.log(
+                      "debug",
+                      `[syncNotificationsWithState] Ignoring special key: ${key}`
+                    );
+                    return false;
+                  }
+
+                  return true;
+                });
+
                 // Filtra i metadati Gun e altri dati non validi
-                const validItems = Object.values(data).filter(
-                  (item: any) =>
-                    item &&
-                    typeof item === "object" &&
-                    item.stealthAddress &&
-                    item.amount &&
-                    !item._ // Esclude i metadati Gun
-                );
+                const validItems = validKeys
+                  .map((key) => data[key])
+                  .filter(
+                    (item: any) =>
+                      item &&
+                      typeof item === "object" &&
+                      item.stealthAddress &&
+                      item.amount &&
+                      !item._ // Esclude i metadati Gun
+                  );
 
                 const notifications: StealthPaymentNotification[] =
                   validItems.map(
@@ -1302,17 +1447,60 @@ export class StealthPlugin
   }
 
   /**
-   * Get listener status information
+   * Setup advanced tracking using ShogunCore's RxJS system
+   * @private
+   */
+  private setupRxJSTracking(): void {
+    if (!this.core || !this.core.rx) {
+      this.log("warn", `[setupRxJSTracking] ShogunCore RxJS not available`);
+      return;
+    }
+
+    try {
+      this.log("info", `[setupRxJSTracking] Setting up RxJS tracking`);
+
+      // Usa il sistema RxJS per tracciare i nodi Gun in modo reattivo
+      const userPub = this.gun.user().is.pub;
+      if (!userPub) return;
+
+      // Crea un observable per i pagamenti stealth
+      const stealthPaymentsNode = this.core.rx
+        .get("shogun")
+        .get("stealth_payments")
+        .get(userPub);
+
+      // Sottoscrivi ai cambiamenti
+      stealthPaymentsNode.subscribe((data: any) => {
+        this.log("debug", `[setupRxJSTracking] RxJS data received:`, data);
+        this.handleGunData(data, "rxjs");
+      });
+
+      this.log("info", `[setupRxJSTracking] RxJS tracking setup complete`);
+    } catch (error) {
+      this.log(
+        "error",
+        `[setupRxJSTracking] Error setting up RxJS tracking:`,
+        error
+      );
+    }
+  }
+
+  /**
+   * Enhanced listener status with RxJS information
    */
   getListenerStatus(): {
     isListening: boolean;
     callbackCount: number;
     paymentCount: number;
+    rxjsAvailable: boolean;
+    eventSystemAvailable: boolean;
   } {
     return {
       isListening: this.isListening,
       callbackCount: this.paymentCallbacks.length,
       paymentCount: this.paymentState.size,
+      rxjsAvailable: !!(this.core && this.core.rx),
+      eventSystemAvailable: !!(this.core && this.core.on),
     };
   }
 
@@ -1495,26 +1683,56 @@ export class StealthPlugin
     const userPub = this.gun.user().is.pub;
     if (!userPub) return;
 
-    this.log("info", `[savePaymentState] Saving ${payments.length} payments`);
+    return new Promise((resolve) => {
+      try {
+        // Usa un timeout per evitare blocchi infiniti
+        const timeout = setTimeout(() => {
+          this.log("warn", `[savePaymentState] Timeout saving payment state`);
+          resolve();
+        }, 10000);
 
-    return new Promise((resolve, reject) => {
-      this.gun
-        .get("shogun")
-        .get("stealth_payment_state")
-        .get(userPub)
-        .put(payments, (ack: any) => {
-          if (ack.err) {
-            this.log(
-              "error",
-              `[savePaymentState] Error saving state:`,
-              ack.err
-            );
-            reject(new Error(ack.err));
-          } else {
-            this.log("info", `[savePaymentState] State saved successfully`);
+        // Filtra i pagamenti validi prima di salvare
+        const validPayments = payments.filter(
+          (payment) =>
+            payment &&
+            typeof payment === "object" &&
+            payment.stealthAddress &&
+            payment.amount
+        );
+
+        this.log(
+          "info",
+          `[savePaymentState] Saving ${validPayments.length} valid payments`
+        );
+
+        this.gun
+          .get("shogun")
+          .get("stealth_payment_state")
+          .get(userPub)
+          .put(validPayments, (ack: any) => {
+            clearTimeout(timeout);
+            try {
+              if (ack && ack.err) {
+                this.log("error", `[savePaymentState] Error saving:`, ack.err);
+              } else {
+                this.log(
+                  "info",
+                  `[savePaymentState] Payment state saved successfully`
+                );
+              }
+            } catch (ackError) {
+              this.log(
+                "error",
+                `[savePaymentState] Error processing ack:`,
+                ackError
+              );
+            }
             resolve();
-          }
-        });
+          });
+      } catch (gunError) {
+        this.log("error", `[savePaymentState] Gun error:`, gunError);
+        resolve();
+      }
     });
   }
 
@@ -1538,33 +1756,83 @@ export class StealthPlugin
   }
 
   /**
+   * Emit event through ShogunCore's centralized event system
+   * @private
+   */
+  private emitEvent(eventName: string, data: any): void {
+    if (this.core && this.core.emit) {
+      this.core.emit(eventName, data);
+    } else {
+      this.log(
+        "debug",
+        `[emitEvent] ShogunCore not available for event: ${eventName}`
+      );
+    }
+  }
+
+  /**
    * Add payment to state and notify callbacks
    * @param payment Payment notification
    */
   private addPaymentToState(payment: StealthPaymentNotification): void {
-    const paymentId = this.getPaymentId(payment);
+    try {
+      const paymentId = this.getPaymentId(payment);
 
-    if (this.isPaymentDuplicate(payment)) {
+      // Check for duplicates
+      if (this.isPaymentDuplicate(payment)) {
+        this.log(
+          "warn",
+          `[addPaymentToState] Duplicate payment ignored: ${paymentId}`
+        );
+        return;
+      }
+
+      // Add to state
+      const paymentWithStatus = {
+        ...payment,
+        status: "pending",
+      };
+
+      this.paymentState.set(paymentId, paymentWithStatus);
+
+      // Emit event through ShogunCore
+      this.emitEvent("stealth:payment:received", {
+        paymentId,
+        stealthAddress: payment.stealthAddress,
+        amount: payment.amount,
+        timestamp: payment.timestamp,
+      });
+
+      // Notify callbacks
+      this.paymentCallbacks.forEach((callback) => {
+        try {
+          callback(payment);
+        } catch (callbackError) {
+          this.log(
+            "error",
+            `[addPaymentToState] Callback error:`,
+            callbackError
+          );
+        }
+      });
+
       this.log(
         "info",
-        `[addPaymentToState] Payment already exists: ${paymentId}`
+        `[addPaymentToState] Payment added to state: ${paymentId}`
       );
-      return;
+
+      // Save state to GunDB
+      const allPayments = Array.from(this.paymentState.values());
+      this.savePaymentState(allPayments).catch((error) => {
+        this.log("error", `[addPaymentToState] Error saving state:`, error);
+      });
+    } catch (error) {
+      this.log(
+        "error",
+        `[addPaymentToState] Error adding payment to state:`,
+        error
+      );
     }
-
-    // Add default status
-    const paymentWithStatus = { ...payment, status: "pending" };
-    this.paymentState.set(paymentId, paymentWithStatus);
-    this.log("info", `[addPaymentToState] Added new payment: ${paymentId}`);
-
-    // Notify all callbacks
-    this.paymentCallbacks.forEach((callback) => {
-      try {
-        callback(payment);
-      } catch (error) {
-        this.log("error", `[addPaymentToState] Callback error:`, error);
-      }
-    });
   }
 
   /**
