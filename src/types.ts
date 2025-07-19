@@ -256,6 +256,11 @@ export interface StealthPluginInterface extends BasePluginInterface {
   };
 
   /**
+   * Check if the plugin is properly initialized
+   */
+  isInitialized(): boolean;
+
+  /**
    * Sync notifications with payment state to recover missed payments
    */
   syncNotificationsWithState(): Promise<void>;
