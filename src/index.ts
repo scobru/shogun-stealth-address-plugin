@@ -1,6 +1,16 @@
 export { StealthPlugin } from "./stealthPlugin";
 export { Stealth } from "./stealth";
 export { BasePlugin } from "./base";
-export type { StealthPluginInterface, StealthAddressResult, StealthData, EphemeralKeyPair, StealthKeys } from "./types";
-export { log, logError, logWarn } from "./utils"; 
+export type {
+  StealthAddressResult,
+  StealthData,
+  StealthPluginInterface,
+  StealthKeys,
+  FluidkeySignature,
+  GunStealthKeyMapping,
+  StealthPayment,
+  StealthPaymentNotification,
+  PaymentForwarderConfig,
+} from "./types";
+export { log, logError, logWarn } from "./utils";
 export { extractViewingPrivateKeyNode } from "@fluidkey/stealth-account-kit";

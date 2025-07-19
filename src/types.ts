@@ -90,7 +90,9 @@ export interface StealthPluginInterface extends BasePluginInterface {
    * @param gunPublicKey The Gun public key to look up
    * @returns Promise<{viewingKey: string, spendingKey: string} | null>
    */
-  getPublicStealthKeys(gunPublicKey: string): Promise<{viewingKey: string, spendingKey: string} | null>;
+  getPublicStealthKeys(
+    gunPublicKey: string
+  ): Promise<{ viewingKey: string; spendingKey: string } | null>;
 
   /**
    * Generate a new stealth address for a recipient
@@ -123,6 +125,31 @@ export interface StealthPluginInterface extends BasePluginInterface {
    * @returns Promise<StealthKeys>
    */
   getStealthKeys(): Promise<StealthKeys>;
+
+  /**
+   * Imposta la configurazione dei contratti
+   */
+  setContractConfig(config: Partial<ContractConfig>): void;
+
+  /**
+   * Imposta la rete corrente
+   */
+  setNetwork(networkName: string): void;
+
+  /**
+   * Ottiene la rete corrente
+   */
+  getCurrentNetwork(): string;
+
+  /**
+   * Ottiene tutte le reti disponibili
+   */
+  getAvailableNetworks(): string[];
+
+  /**
+   * Aggiunge o aggiorna la configurazione di una rete
+   */
+  setNetworkConfig(networkName: string, config: NetworkConfig): void;
 }
 
 /**
@@ -132,4 +159,52 @@ export interface GunStealthKeyMapping {
   viewingKey: string;
   spendingKey: string;
   timestamp: number;
-} 
+}
+
+export interface StealthPayment {
+  stealthAddress: string;
+  ephemeralPublicKey: string;
+  amount: string;
+  token: string; // ETH_TOKEN_PLACEHOLDER per ETH, o indirizzo token
+  sender: string; // Gun public key del mittente
+  timestamp: number;
+  status: "pending" | "claimed" | "expired";
+  txHash?: string; // Hash della transazione on-chain
+  toll?: string; // Tassa pagata
+}
+
+export interface StealthPaymentNotification {
+  stealthAddress: string;
+  ephemeralPublicKey: string;
+  amount: string;
+  token: string;
+  sender: string;
+  timestamp: number;
+  message?: string; // Messaggio opzionale
+}
+
+export interface PaymentForwarderConfig {
+  address: string;
+  toll: string;
+  tollCollector: string;
+  tollReceiver: string;
+}
+
+/**
+ * Configurazione per una rete specifica
+ */
+export interface NetworkConfig {
+  paymentForwarder: string;
+  stealthKeyRegistry: string;
+  rpcUrl?: string;
+}
+
+/**
+ * Configurazione completa dei contratti
+ */
+export interface ContractConfig {
+  networks: {
+    [networkName: string]: NetworkConfig;
+  };
+  defaultNetwork?: string;
+}
