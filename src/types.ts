@@ -80,10 +80,16 @@ export interface LogMessage {
  */
 export interface StealthPluginInterface extends BasePluginInterface {
   /**
-   * Get or generate stealth keys for the current user
+   * Get existing stealth keys for the current user (does not generate new ones)
+   * @returns Promise<StealthKeys | null> - null if no keys exist
+   */
+  getUserStealthKeys(): Promise<StealthKeys | null>;
+
+  /**
+   * Create and save new stealth keys for the current user
    * @returns Promise<StealthKeys>
    */
-  getUserStealthKeys(): Promise<StealthKeys>;
+  createUserStealthKeys(): Promise<StealthKeys>;
 
   /**
    * Get public stealth keys for a given Gun public key

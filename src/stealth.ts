@@ -17,6 +17,7 @@ import {
   generateStealthPrivateKey,
 } from "@fluidkey/stealth-account-kit";
 import { HDKey } from "@scure/bip32";
+import { Buffer } from "./buffer-polyfill";
 
 // Utility di normalizzazione hex
 export function normalizeHex(str: string, length?: number): string {

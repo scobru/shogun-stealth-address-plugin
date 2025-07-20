@@ -173,6 +173,7 @@ export class StealthPlugin
 
   destroy(): void {
     super.destroy();
+
     this.gun = null;
     this.paymentForwarderContract = null;
     this.stealthKeyRegistryContract = null;
@@ -243,46 +244,17 @@ export class StealthPlugin
     const userPub = gunUser.is.pub;
 
     // Save private keys in user space
-    await new Promise<void>((resolve, reject) => {
-      gunUser
-        .get("shogun")
-        .get("stealth_keys")
-        .put(
-          {
-            viewingKey: keys.viewingKey.privateKey,
-            spendingKey: keys.spendingKey.privateKey,
-            timestamp: Date.now(),
-          },
-          (ack: any) => {
-            if (ack.err) {
-              reject(new Error(ack.err));
-            } else {
-              resolve();
-            }
-          }
-        );
+    gunUser.get("shogun").get("stealth_keys").put({
+      viewingKey: keys.viewingKey.privateKey,
+      spendingKey: keys.spendingKey.privateKey,
+      timestamp: Date.now(),
     });
 
     // Save public keys in public space
-    await new Promise<void>((resolve, reject) => {
-      this.core.gun
-        .get("shogun")
-        .get("stealth_public_keys")
-        .get(userPub)
-        .put(
-          {
-            viewingKey: keys.viewingKey.publicKey,
-            spendingKey: keys.spendingKey.publicKey,
-            timestamp: Date.now(),
-          },
-          (ack: any) => {
-            if (ack.err) {
-              reject(new Error(ack.err));
-            } else {
-              resolve();
-            }
-          }
-        );
+    this.core.gun.get("shogun").get("stealth_public_keys").get(userPub).put({
+      viewingKey: keys.viewingKey.publicKey,
+      spendingKey: keys.spendingKey.publicKey,
+      timestamp: Date.now(),
     });
   }
 
@@ -299,7 +271,12 @@ export class StealthPlugin
 
     // Get private keys from user space
     const privateKeys = await new Promise<any>((resolve) => {
-      gunUser.get("shogun").get("stealth_keys").once(resolve);
+      gunUser
+        .get("shogun")
+        .get("stealth_keys")
+        .once((data: any) => {
+          resolve(data);
+        });
     });
 
     if (!privateKeys) {
@@ -312,7 +289,9 @@ export class StealthPlugin
         .get("shogun")
         .get("stealth_public_keys")
         .get(gunUser.is.pub)
-        .once(resolve);
+        .once((data: any) => {
+          resolve(data);
+        });
     });
 
     if (!publicKeys) {
@@ -352,7 +331,9 @@ export class StealthPlugin
         .get("shogun")
         .get("stealth_public_keys")
         .get(gunPublicKey)
-        .once(resolve);
+        .once((data: any) => {
+          resolve(data);
+        });
     });
 
     this.log("info", `[getPublicStealthKeys] Retrieved data:`, publicKeys);
@@ -379,26 +360,6 @@ export class StealthPlugin
       viewingKey: publicKeys.viewingKey,
       spendingKey: publicKeys.spendingKey,
     };
-  }
-
-  /**
-   * Gets or generates stealth keys for the current user
-   * @returns Promise<StealthKeys>
-   */
-  async getUserStealthKeys(): Promise<StealthKeys> {
-    try {
-      const existingKeys = await this.getKeysFromGun();
-      if (existingKeys) {
-        return existingKeys;
-      }
-
-      const newKeys = await this.stealth.getStealthKeys();
-      await this.saveKeysToGun(newKeys);
-      return newKeys;
-    } catch (error) {
-      console.error("Error getting user stealth keys:", error);
-      throw error;
-    }
   }
 
   /**
@@ -1398,11 +1359,38 @@ export class StealthPlugin
   }
 
   /**
+   * Get user public key safely
+   * @private
+   */
+  private getUserPub(): string | null {
+    try {
+      const user = this.gun.user();
+      if (!user || !user.is || !user.is.pub) {
+        this.log(
+          "warn",
+          `[getUserPub] User not authenticated or missing pub key`
+        );
+        return null;
+      }
+      return user.is.pub;
+    } catch (error) {
+      this.log("error", `[getUserPub] Error getting user pub:`, error);
+      return null;
+    }
+  }
+
+  /**
    * Sync notifications with payment state to recover missed payments
    */
   async syncNotificationsWithState(): Promise<void> {
-    const userPub = this.gun.user().is.pub;
-    if (!userPub) return;
+    const userPub = this.getUserPub();
+    if (!userPub) {
+      this.log(
+        "warn",
+        `[syncNotificationsWithState] User not authenticated or missing pub key`
+      );
+      return;
+    }
 
     // Verifica se è stata fatta una eliminazione definitiva recente (ultimi 30 secondi)
     const timeSinceLastClear = Date.now() - this.lastClearTimestamp;
@@ -1707,6 +1695,12 @@ export class StealthPlugin
         }
 
         // Apri lo stealth address
+        if (!stealthKeys) {
+          throw new Error(
+            "Stealth keys not found. Cannot open stealth address."
+          );
+        }
+
         const stealthWallet = await this.openStealthAddress(
           stealthAddress,
           ephemeralKey,
@@ -2648,6 +2642,10 @@ export class StealthPlugin
     try {
       const stealthKeys = await this.getUserStealthKeys();
 
+      if (!stealthKeys) {
+        return false;
+      }
+
       // Tenta di aprire lo stealth address
       await this.openStealthAddress(
         stealthAddress,
@@ -2714,6 +2712,22 @@ export class StealthPlugin
       if (!addressesToScan || addressesToScan.length === 0) {
         try {
           const userKeys = await this.getUserStealthKeys();
+
+          // Controllo null per userKeys
+          if (!userKeys) {
+            this.log(
+              "error",
+              `[scanOnChainPayments] ❌ Nessuna chiave stealth trovata per l'utente`
+            );
+            errors.push("Nessuna chiave stealth trovata per l'utente");
+            return {
+              scannedBlocks: 0,
+              foundPayments: 0,
+              savedPayments: 0,
+              errors,
+            };
+          }
+
           // Genera alcuni indirizzi stealth per lo scan
           const ephemeralKey = await this.generateEphemeralKeyPair();
           const stealthAddress = await this.generateStealthAddress(
@@ -2943,5 +2957,80 @@ export class StealthPlugin
     }
 
     await this.syncNotificationsWithState();
+  }
+
+  /**
+   * Gets existing stealth keys for the current user (does not generate new ones)
+   * @returns Promise<StealthKeys | null> - null if no keys exist
+   */
+  async getUserStealthKeys(): Promise<StealthKeys | null> {
+    try {
+      this.log(
+        "info",
+        "[getUserStealthKeys] Attempting to get existing keys from Gun"
+      );
+
+      // Recupera solo le chiavi esistenti
+      const existingKeys = await this.getKeysFromGun();
+      if (existingKeys) {
+        this.log("info", "[getUserStealthKeys] Found existing keys in Gun");
+        return existingKeys;
+      }
+
+      this.log(
+        "info",
+        "[getUserStealthKeys] No existing keys found, returning null"
+      );
+      return null;
+    } catch (error) {
+      this.log(
+        "error",
+        "[getUserStealthKeys] Error getting user stealth keys:",
+        error
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Creates and saves new stealth keys for the current user
+   * @returns Promise<StealthKeys>
+   */
+  async createUserStealthKeys(): Promise<StealthKeys> {
+    try {
+      this.log("info", "[createUserStealthKeys] Generating new stealth keys");
+
+      // Genera nuove chiavi
+      const newKeys = await this.stealth.getStealthKeys();
+
+      // Salvataggio asincrono per non bloccare il ritorno delle chiavi
+      this.saveKeysToGun(newKeys)
+        .then(() => {
+          this.log(
+            "info",
+            "[createUserStealthKeys] Keys saved to Gun successfully"
+          );
+        })
+        .catch((error) => {
+          this.log(
+            "error",
+            "[createUserStealthKeys] Error saving keys to Gun (non-blocking):",
+            error
+          );
+        });
+
+      this.log(
+        "info",
+        "[createUserStealthKeys] Generated new keys successfully"
+      );
+      return newKeys;
+    } catch (error) {
+      this.log(
+        "error",
+        "[createUserStealthKeys] Error creating user stealth keys:",
+        error
+      );
+      throw error;
+    }
   }
 }

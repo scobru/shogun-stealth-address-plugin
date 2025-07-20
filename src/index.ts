@@ -1,3 +1,6 @@
+// Importa il polyfill di Buffer per prima cosa
+import "./buffer-polyfill";
+
 export { StealthPlugin } from "./stealthPlugin";
 export { Stealth } from "./stealth";
 export { BasePlugin } from "./base";
