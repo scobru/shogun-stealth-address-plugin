@@ -6,17 +6,12 @@ import {
   StealthPluginInterface,
   StealthKeys,
   FluidkeySignature,
-  GunStealthKeyMapping,
-  StealthPayment,
   StealthPaymentNotification,
-  PaymentForwarderConfig,
 } from "./types";
 import { ethers } from "ethers";
-import { log } from "./utils";
 import {
   PAYMENT_FORWARDER_ABI,
   STEALTH_KEY_REGISTRY_ABI,
-  CONTRACT_ADDRESSES,
   ETH_TOKEN_PLACEHOLDER,
   ContractManager,
   ContractConfig,
@@ -28,8 +23,6 @@ import {
   generateStealthAddresses,
   generateStealthPrivateKey,
 } from "@fluidkey/stealth-account-kit";
-
-import { normalizeHex } from "./stealth";
 
 /**
  * Plugin per la gestione delle funzionalità Stealth in ShogunCore
@@ -71,20 +64,7 @@ export class StealthPlugin
   initialize(core: any): void {
     super.initialize(core);
 
-    this.log("info", "[initialize] Starting plugin initialization");
-    this.log("info", "[initialize] Core received:", {
-      hasGun: !!core.gun,
-      hasProvider: !!core.provider,
-      hasSigner: !!core.signer,
-      coreKeys: Object.keys(core),
-    });
-
-    // Se il plugin è già completamente inizializzato, non reinizializzare
     if (this.isFullyInitialized()) {
-      this.log(
-        "info",
-        "[initialize] Plugin already fully initialized, skipping re-initialization"
-      );
       return;
     }
 
@@ -92,36 +72,12 @@ export class StealthPlugin
     this.provider = core.provider;
     this.signer = core.signer;
 
-    this.log("info", "[initialize] Properties set:", {
-      gun: !!this.gun,
-      provider: !!this.provider,
-      signer: !!this.signer,
-      core: !!this.core,
-    });
-
     if (!this.gun) {
       throw new Error("Gun instance is required");
     }
 
-    // Provider e signer sono opzionali durante l'inizializzazione iniziale
-    // Verranno impostati successivamente tramite registerStealthPlugin
-    if (!this.provider) {
-      this.log(
-        "warn",
-        "Provider not available during initialization - will be set later"
-      );
-    }
-
-    if (!this.signer) {
-      this.log(
-        "warn",
-        "Signer not available during initialization - will be set later"
-      );
-    }
-
     this.contractManager = new ContractManager();
 
-    // Initialize contracts only if provider and signer are available
     if (
       this.provider &&
       this.signer &&
@@ -130,24 +86,13 @@ export class StealthPlugin
       this.initializeContracts();
     }
 
-    // Load payment state and sync notifications only if we have the necessary components
     if (this.gun) {
       this.loadPaymentState().then(() => {
         this.syncNotificationsWithState().then(() => {
-          // Start payment listener after sync
           this.startPaymentListener();
         });
       });
     }
-
-    this.log("info", "Stealth plugin initialized successfully");
-    this.log("info", "[initialize] Final state:", {
-      gun: !!this.gun,
-      provider: !!this.provider,
-      signer: !!this.signer,
-      core: !!this.core,
-      isFullyInitialized: this.isFullyInitialized(),
-    });
   }
 
   /**
@@ -155,24 +100,9 @@ export class StealthPlugin
    * This method is called by registerStealthPlugin
    */
   setProviderAndSigner(provider: ethers.Provider, signer: ethers.Signer): void {
-    this.log("info", "[setProviderAndSigner] Setting provider and signer");
-    this.log("info", "[setProviderAndSigner] Provider:", !!provider);
-    this.log("info", "[setProviderAndSigner] Signer:", !!signer);
-
     this.provider = provider;
     this.signer = signer;
 
-    this.log(
-      "info",
-      "[setProviderAndSigner] Provider and signer set successfully"
-    );
-    this.log(
-      "info",
-      "[setProviderAndSigner] Plugin fully initialized:",
-      this.isFullyInitialized()
-    );
-
-    // Initialize contracts now that we have provider and signer
     if (this.contractManager.getAvailableNetworks().length > 0) {
       this.initializeContracts();
     }
@@ -219,7 +149,6 @@ export class StealthPlugin
     if (!this.provider || !this.signer) return;
 
     try {
-      // Initialize PaymentForwarder contract
       const paymentForwarderAddress =
         this.contractManager.getPaymentForwarderAddress();
       this.paymentForwarderContract = new ethers.Contract(
@@ -228,7 +157,6 @@ export class StealthPlugin
         this.signer
       );
 
-      // Initialize StealthKeyRegistry contract if address is available
       const stealthKeyRegistryAddress =
         this.contractManager.getStealthKeyRegistryAddress();
       if (stealthKeyRegistryAddress) {
@@ -238,13 +166,8 @@ export class StealthPlugin
           this.signer
         );
       }
-
-      this.log(
-        "info",
-        `Contracts initialized for network: ${this.contractManager.getCurrentNetwork()}`
-      );
     } catch (error) {
-      this.log("error", `Failed to initialize contracts: ${error}`);
+      console.error("Failed to initialize contracts:", error);
     }
   }
 
@@ -318,18 +241,8 @@ export class StealthPlugin
     if (!gunUser.is) throw new Error("User not authenticated");
 
     const userPub = gunUser.is.pub;
-    this.log("info", `[saveKeysToGun] Saving keys for user: ${userPub}`);
-    this.log(
-      "info",
-      `[saveKeysToGun] Viewing key public: ${keys.viewingKey.publicKey.substring(0, 20)}...`
-    );
-    this.log(
-      "info",
-      `[saveKeysToGun] Spending key public: ${keys.spendingKey.publicKey.substring(0, 20)}...`
-    );
 
     // Save private keys in user space
-    this.log("info", "[saveKeysToGun] Saving private keys to user space");
     await new Promise<void>((resolve, reject) => {
       gunUser
         .get("shogun")
@@ -341,19 +254,9 @@ export class StealthPlugin
             timestamp: Date.now(),
           },
           (ack: any) => {
-            this.log("info", `[saveKeysToGun] Private keys save ack:`, ack);
             if (ack.err) {
-              this.log(
-                "error",
-                `[saveKeysToGun] ❌ Error saving private keys:`,
-                ack.err
-              );
               reject(new Error(ack.err));
             } else {
-              this.log(
-                "info",
-                `[saveKeysToGun] ✅ Private keys saved successfully`
-              );
               resolve();
             }
           }
@@ -361,7 +264,6 @@ export class StealthPlugin
     });
 
     // Save public keys in public space
-    this.log("info", "[saveKeysToGun] Saving public keys to public space");
     await new Promise<void>((resolve, reject) => {
       this.core.gun
         .get("shogun")
@@ -374,29 +276,14 @@ export class StealthPlugin
             timestamp: Date.now(),
           },
           (ack: any) => {
-            this.log("info", `[saveKeysToGun] Public keys save ack:`, ack);
             if (ack.err) {
-              this.log(
-                "error",
-                `[saveKeysToGun] ❌ Error saving public keys:`,
-                ack.err
-              );
               reject(new Error(ack.err));
             } else {
-              this.log(
-                "info",
-                `[saveKeysToGun] ✅ Public keys saved successfully`
-              );
               resolve();
             }
           }
         );
     });
-
-    this.log(
-      "info",
-      `[saveKeysToGun] ✅ All stealth keys saved successfully to GunDB`
-    );
   }
 
   /**
@@ -410,35 +297,16 @@ export class StealthPlugin
     const gunUser = this.core.gun.user();
     if (!gunUser.is) throw new Error("User not authenticated");
 
-    this.log(
-      "info",
-      `[getKeysFromGun] Retrieving keys for user: ${gunUser.is.pub}`
-    );
-
     // Get private keys from user space
-    this.log(
-      "info",
-      "[getKeysFromGun] Retrieving private keys from user space"
-    );
     const privateKeys = await new Promise<any>((resolve) => {
       gunUser.get("shogun").get("stealth_keys").once(resolve);
     });
 
     if (!privateKeys) {
-      this.log(
-        "info",
-        "[getKeysFromGun] ❌ No private keys found in user space"
-      );
       return null;
     }
 
-    this.log("info", "[getKeysFromGun] ✅ Private keys found in user space");
-
     // Get public keys from public space
-    this.log(
-      "info",
-      "[getKeysFromGun] Retrieving public keys from public space"
-    );
     const publicKeys = await new Promise<any>((resolve) => {
       this.core.gun
         .get("shogun")
@@ -448,18 +316,8 @@ export class StealthPlugin
     });
 
     if (!publicKeys) {
-      this.log(
-        "info",
-        "[getKeysFromGun] ❌ No public keys found in public space"
-      );
       return null;
     }
-
-    this.log("info", "[getKeysFromGun] ✅ Public keys found in public space");
-    this.log(
-      "info",
-      "[getKeysFromGun] ✅ Successfully retrieved both private and public keys"
-    );
 
     return {
       viewingKey: {
@@ -528,66 +386,17 @@ export class StealthPlugin
    * @returns Promise<StealthKeys>
    */
   async getUserStealthKeys(): Promise<StealthKeys> {
-    this.assertInitialized();
-
     try {
-      this.log("info", "[getUserStealthKeys] Starting stealth keys retrieval");
-
-      // Try to get existing keys first
-      this.log(
-        "info",
-        "[getUserStealthKeys] Attempting to retrieve existing keys from GunDB"
-      );
       const existingKeys = await this.getKeysFromGun();
-
       if (existingKeys) {
-        this.log(
-          "info",
-          "[getUserStealthKeys] ✅ Retrieved existing stealth keys from GunDB"
-        );
-        this.log(
-          "info",
-          "[getUserStealthKeys] Viewing key public:",
-          existingKeys.viewingKey.publicKey.substring(0, 20) + "..."
-        );
-        this.log(
-          "info",
-          "[getUserStealthKeys] Spending key public:",
-          existingKeys.spendingKey.publicKey.substring(0, 20) + "..."
-        );
         return existingKeys;
       }
 
-      // If no keys exist, generate new ones
-      this.log(
-        "info",
-        "[getUserStealthKeys] ⚠️ No existing keys found in GunDB, generating new ones"
-      );
       const newKeys = await this.stealth.getStealthKeys();
-      this.log("info", "[getUserStealthKeys] Generated new stealth keys");
-      this.log(
-        "info",
-        "[getUserStealthKeys] Viewing key public:",
-        newKeys.viewingKey.publicKey.substring(0, 20) + "..."
-      );
-      this.log(
-        "info",
-        "[getUserStealthKeys] Spending key public:",
-        newKeys.spendingKey.publicKey.substring(0, 20) + "..."
-      );
-
       await this.saveKeysToGun(newKeys);
-      this.log(
-        "info",
-        "[getUserStealthKeys] ✅ Generated and saved new stealth keys to GunDB"
-      );
       return newKeys;
     } catch (error) {
-      this.log(
-        "error",
-        "[getUserStealthKeys] ❌ Error getting user stealth keys",
-        error
-      );
+      console.error("Error getting user stealth keys:", error);
       throw error;
     }
   }
@@ -612,24 +421,13 @@ export class StealthPlugin
     spendingPrivateKey?: string
   ): Promise<StealthAddressResult> {
     try {
-      // Passa sempre la ephemeralPrivateKey se fornita
-      this.log("debug", "[PLUGIN][GEN] Params", {
-        recipientViewingKey: normalizeHex(recipientViewingKey, 64),
-        recipientSpendingKey: normalizeHex(recipientSpendingKey, 64),
-        ephemeralPrivateKey: ephemeralPrivateKey
-          ? normalizeHex(ephemeralPrivateKey, 32)
-          : undefined,
-        spendingPrivateKey: spendingPrivateKey
-          ? normalizeHex(spendingPrivateKey, 32)
-          : undefined,
-      });
       return await this.stealth.generateStealthAddress(
         recipientViewingKey,
         recipientSpendingKey,
         ephemeralPrivateKey,
-        undefined, // viewingPrivateKey - non necessario per la generazione
-        undefined, // derivationIndex
-        spendingPrivateKey // Aggiungi il parametro spendingPrivateKey
+        undefined,
+        undefined,
+        spendingPrivateKey
       );
     } catch (error) {
       console.error("Error generating stealth address:", error);
@@ -691,12 +489,6 @@ export class StealthPlugin
     if (!ephemeralPublicKey) {
       throw new Error("Missing ephemeral public key");
     }
-    this.log("debug", "[PLUGIN][OPEN] Params", {
-      stealthAddress: normalizeHex(stealthAddress, 20),
-      ephemeralPublicKey: normalizeHex(ephemeralPublicKey, 33), // Changed from 65 to 33
-      viewingPrivateKey: normalizeHex(viewingPrivateKey, 32),
-      spendingPrivateKey: normalizeHex(spendingPrivateKey, 32),
-    });
     return await this.stealth.openStealthAddress(
       stealthAddress,
       ephemeralPublicKey,
@@ -713,7 +505,7 @@ export class StealthPlugin
     try {
       return await this.stealth.getStealthKeys();
     } catch (error) {
-      this.log("error", "Error getting stealth keys", error);
+      console.error("Error getting stealth keys:", error);
       throw error;
     }
   }
@@ -1266,7 +1058,6 @@ export class StealthPlugin
    */
   clearPaymentCallbacks(): void {
     this.paymentCallbacks = [];
-    this.log("info", `[clearPaymentCallbacks] All callbacks cleared`);
   }
 
   /**
