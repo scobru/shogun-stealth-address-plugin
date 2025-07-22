@@ -478,11 +478,30 @@ export class StealthPlugin
   async generateAndSaveStealthKeys(): Promise<StealthKeys> {
     const stealth = this.stealth;
 
-    // Generate and save the keys
-    await stealth.generateAndSaveKeys();
+    // Ottieni la firma del messaggio "I Love Shogun!" se disponibile
+    let authSignature: string | undefined;
+    if (this.signer) {
+      try {
+        const message = "I Love Shogun!";
+        authSignature = await this.signer.signMessage(message);
+        this.log(
+          "info",
+          `[generateAndSaveStealthKeys] Using signature as seed: ${authSignature.substring(0, 20)}...`
+        );
+      } catch (error) {
+        this.log(
+          "warn",
+          "[generateAndSaveStealthKeys] Could not get signature, using default seed"
+        );
+      }
+    }
+
+    // Generate and save the keys deterministically
+    const keys = await stealth.getStealthKeys(authSignature);
+    await this.saveKeysToGun(keys);
 
     // Return the generated keys
-    return stealth.getStealthKeys();
+    return keys;
   }
 
   /**
@@ -570,47 +589,6 @@ export class StealthPlugin
       this.log("error", "[generateFluidkeyStealthPrivateKey] Error:", error);
       throw error;
     }
-  }
-
-  private async processStealthData(stealthData: StealthData): Promise<void> {
-    try {
-      // If we have an ephemeral key pair, use it
-      if (stealthData.ephemeralKeyPair?.pub) {
-        await this.gun.get("ephemeralKeys").put({
-          pub: stealthData.ephemeralKeyPair.pub,
-          priv: stealthData.ephemeralKeyPair.priv,
-          epub: stealthData.ephemeralKeyPair.epub,
-          epriv: stealthData.ephemeralKeyPair.epriv,
-        });
-      }
-
-      // Store the stealth data
-      await this.gun.get("stealthData").put({
-        stealthAddress: stealthData.stealthAddress,
-        ephemeralPublicKey: stealthData.ephemeralPublicKey,
-        recipientViewingKey: stealthData.recipientViewingKey,
-        recipientSpendingKey: stealthData.recipientSpendingKey,
-      });
-    } catch (error) {
-      console.error("Error processing stealth data:", error);
-      throw error;
-    }
-  }
-
-  private async openStealthAddressWithData(
-    stealthData: StealthData,
-    viewingPrivateKey: string,
-    spendingPrivateKey: string
-  ): Promise<ethers.Wallet> {
-    if (!stealthData.ephemeralPublicKey) {
-      throw new Error("Missing ephemeral public key");
-    }
-    return await this.stealth.openStealthAddress(
-      stealthData.stealthAddress,
-      stealthData.ephemeralPublicKey,
-      viewingPrivateKey,
-      spendingPrivateKey
-    );
   }
 
   private log(level: string, message: string, error?: any): void {
@@ -2965,30 +2943,44 @@ export class StealthPlugin
    */
   async getUserStealthKeys(): Promise<StealthKeys | null> {
     try {
-      this.log(
-        "info",
-        "[getUserStealthKeys] Attempting to get existing keys from Gun"
-      );
+      this.log("info", "[getUserStealthKeys] Getting user stealth keys");
 
-      // Recupera solo le chiavi esistenti
-      const existingKeys = await this.getKeysFromGun();
-      if (existingKeys) {
-        this.log("info", "[getUserStealthKeys] Found existing keys in Gun");
-        return existingKeys;
+      // Prima prova a caricare da GunDB
+      const gunKeys = await this.getKeysFromGun();
+
+      if (gunKeys) {
+        this.log("info", "[getUserStealthKeys] Found keys in GunDB");
+        return gunKeys;
       }
 
+      // Se non ci sono chiavi in GunDB, prova a sincronizzare da on-chain
       this.log(
         "info",
-        "[getUserStealthKeys] No existing keys found, returning null"
+        "[getUserStealthKeys] No keys in GunDB, checking on-chain"
       );
-      return null;
+      const onChainKeys = await this.syncKeysFromOnChain();
+
+      if (onChainKeys) {
+        this.log("info", "[getUserStealthKeys] Synced keys from on-chain");
+        return onChainKeys;
+      }
+
+      // Se non ci sono chiavi da nessuna parte, prova a generarle deterministicamente
+      this.log(
+        "info",
+        "[getUserStealthKeys] No keys found, generating deterministic keys"
+      );
+      const deterministicKeys = await this.createUserStealthKeys();
+
+      this.log("info", "[getUserStealthKeys] Generated deterministic keys");
+      return deterministicKeys;
     } catch (error) {
       this.log(
         "error",
         "[getUserStealthKeys] Error getting user stealth keys:",
         error
       );
-      throw error;
+      return null;
     }
   }
 
@@ -3000,8 +2992,26 @@ export class StealthPlugin
     try {
       this.log("info", "[createUserStealthKeys] Generating new stealth keys");
 
-      // Genera nuove chiavi
-      const newKeys = await this.stealth.getStealthKeys();
+      // Ottieni la firma del messaggio "I Love Shogun!" se disponibile
+      let signature: string | undefined;
+      if (this.signer) {
+        try {
+          const message = "I Love Shogun!";
+          signature = await this.signer.signMessage(message);
+          this.log(
+            "info",
+            `[createUserStealthKeys] Using signature as seed: ${signature.substring(0, 20)}...`
+          );
+        } catch (error) {
+          this.log(
+            "warn",
+            "[createUserStealthKeys] Could not get signature, using default seed"
+          );
+        }
+      }
+
+      // Genera nuove chiavi deterministiche dalla firma
+      const newKeys = await this.stealth.getStealthKeys(signature);
 
       // Salvataggio asincrono per non bloccare il ritorno delle chiavi
       this.saveKeysToGun(newKeys)
@@ -3031,6 +3041,228 @@ export class StealthPlugin
         error
       );
       throw error;
+    }
+  }
+
+  /**
+   * Syncs stealth keys from on-chain to GunDB if they exist
+   * @returns Promise<StealthKeys | null> - null if no keys found on-chain
+   */
+  async syncKeysFromOnChain(): Promise<StealthKeys | null> {
+    try {
+      this.log(
+        "info",
+        "[syncKeysFromOnChain] Checking for on-chain stealth keys"
+      );
+
+      if (!this.signer || !this.stealthKeyRegistryContract) {
+        this.log(
+          "warn",
+          "[syncKeysFromOnChain] Signer or contract not available"
+        );
+        return null;
+      }
+
+      const walletAddress = await this.signer.getAddress();
+
+      // Check if keys exist on-chain
+      const [viewingKey, spendingKey] =
+        await this.stealthKeyRegistryContract.getStealthKeys(walletAddress);
+
+      if (!viewingKey || viewingKey.length === 0) {
+        this.log("info", "[syncKeysFromOnChain] No keys found on-chain");
+        return null;
+      }
+
+      this.log(
+        "info",
+        "[syncKeysFromOnChain] Found keys on-chain, syncing to GunDB"
+      );
+
+      // Create StealthKeys object from on-chain data
+      const onChainKeys: StealthKeys = {
+        viewingKey: {
+          privateKey: "", // Not available on-chain
+          publicKey: viewingKey,
+        },
+        spendingKey: {
+          privateKey: "", // Not available on-chain
+          publicKey: spendingKey,
+        },
+      };
+
+      // Save to GunDB
+      await this.saveKeysToGun(onChainKeys);
+
+      this.log("info", "[syncKeysFromOnChain] Keys synced successfully");
+      return onChainKeys;
+    } catch (error) {
+      this.log("error", "[syncKeysFromOnChain] Error syncing keys:", error);
+      return null;
+    }
+  }
+
+  /**
+   * Helper method to get SEA signature from Gun user
+   * @returns Promise<string | null> - SEA signature or null if not available
+   */
+  private async getSEASignature(): Promise<string | null> {
+    if (!this.gun || !this.gun.user || !this.gun.user.is) {
+      return null;
+    }
+
+    try {
+      const pair = this.gun.user._.sea;
+      if (pair && pair.priv) {
+        this.log(
+          "info",
+          `[getSEASignature] Found SEA signature: ${pair.priv.substring(0, 20)}...`
+        );
+        return pair.priv;
+      }
+      this.log("warn", "[getSEASignature] No SEA pair found");
+      return null;
+    } catch (error) {
+      this.log("warn", "[getSEASignature] Could not get SEA signature:", error);
+      return null;
+    }
+  }
+
+  /**
+   * Creates and saves new stealth keys using SEA signature as seed
+   * @returns Promise<StealthKeys>
+   */
+  async createUserStealthKeysWithSEA(): Promise<StealthKeys> {
+    try {
+      this.log(
+        "info",
+        "[createUserStealthKeysWithSEA] Generating stealth keys with SEA signature"
+      );
+
+      // Ottieni la firma SEA usando il metodo helper
+      const seaSignature = await this.getSEASignature();
+
+      if (!seaSignature) {
+        this.log(
+          "warn",
+          "[createUserStealthKeysWithSEA] No SEA signature available, falling back to wallet signature"
+        );
+        return this.createUserStealthKeys();
+      }
+
+      // Usa il metodo unificato che gestisce sia Fluidkey che fallback
+      const newKeys = await this.stealth.getStealthKeys(seaSignature);
+
+      // Salvataggio asincrono per non bloccare il ritorno delle chiavi
+      this.saveKeysToGun(newKeys)
+        .then(() => {
+          this.log(
+            "info",
+            "[createUserStealthKeysWithSEA] Keys saved to Gun successfully"
+          );
+        })
+        .catch((error) => {
+          this.log(
+            "error",
+            "[createUserStealthKeysWithSEA] Error saving keys to Gun (non-blocking):",
+            error
+          );
+        });
+
+      this.log(
+        "info",
+        "[createUserStealthKeysWithSEA] Generated new keys successfully with SEA signature"
+      );
+      return newKeys;
+    } catch (error) {
+      this.log(
+        "error",
+        "[createUserStealthKeysWithSEA] Error creating user stealth keys with SEA:",
+        error
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Generates and saves stealth keys using SEA signature as seed
+   * @returns Promise with the generated stealth keys
+   */
+  async generateAndSaveStealthKeysWithSEA(): Promise<StealthKeys> {
+    const stealth = this.stealth;
+
+    // Ottieni la firma SEA usando il metodo helper
+    const seaSignature = await this.getSEASignature();
+
+    if (!seaSignature) {
+      this.log(
+        "warn",
+        "[generateAndSaveStealthKeysWithSEA] No SEA signature available, falling back to wallet signature"
+      );
+      return this.generateAndSaveStealthKeys();
+    }
+
+    // Usa il metodo unificato che gestisce sia Fluidkey che fallback
+    const keys = await stealth.getStealthKeys(seaSignature);
+    await this.saveKeysToGun(keys);
+
+    // Return the generated keys
+    return keys;
+  }
+
+  /**
+   * Get existing stealth keys for the current user using SEA signature as seed (does not generate new ones)
+   * @returns Promise<StealthKeys | null> - null if no keys exist
+   */
+  async getUserStealthKeysWithSEA(): Promise<StealthKeys | null> {
+    try {
+      this.log(
+        "info",
+        "[getUserStealthKeysWithSEA] Getting user stealth keys with SEA signature"
+      );
+
+      // Prima prova a caricare da GunDB
+      const gunKeys = await this.getKeysFromGun();
+
+      if (gunKeys) {
+        this.log("info", "[getUserStealthKeysWithSEA] Found keys in GunDB");
+        return gunKeys;
+      }
+
+      // Se non ci sono chiavi in GunDB, prova a sincronizzare da on-chain
+      this.log(
+        "info",
+        "[getUserStealthKeysWithSEA] No keys in GunDB, checking on-chain"
+      );
+      const onChainKeys = await this.syncKeysFromOnChain();
+
+      if (onChainKeys) {
+        this.log(
+          "info",
+          "[getUserStealthKeysWithSEA] Synced keys from on-chain"
+        );
+        return onChainKeys;
+      }
+
+      // Se non ci sono chiavi da nessuna parte, prova a generarle con SEA
+      this.log(
+        "info",
+        "[getUserStealthKeysWithSEA] No keys found, generating with SEA signature"
+      );
+      const seaKeys = await this.createUserStealthKeysWithSEA();
+
+      this.log(
+        "info",
+        "[getUserStealthKeysWithSEA] Generated keys with SEA signature"
+      );
+      return seaKeys;
+    } catch (error) {
+      this.log(
+        "error",
+        "[getUserStealthKeysWithSEA] Error getting user stealth keys with SEA:",
+        error
+      );
+      return null;
     }
   }
 }

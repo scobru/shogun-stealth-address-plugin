@@ -127,29 +127,38 @@ export class Stealth {
   }
 
   /**
-   * Gets the stealth keys for the current user (placeholder implementation)
+   * Gets the stealth keys for the current user (deterministic implementation)
    */
-  async getStealthKeys(): Promise<StealthKeys> {
-    const wallet1 = ethers.Wallet.createRandom();
-    const wallet2 = ethers.Wallet.createRandom();
+  async getStealthKeys(signature?: string): Promise<StealthKeys> {
+    // Se viene fornita una firma, usa il metodo unificato con Fluidkey
+    if (signature && signature !== "default_seed") {
+      return this.generateStealthKeysFromStringSignature(signature);
+    }
+
+    // Se non viene fornita una firma, usa un seed di default
+    const seed = signature || "default_seed";
+
+    // Genera chiavi deterministiche dal seed
+    const viewingWallet = this.deriveWalletFromSeed(seed, "viewing");
+    const spendingWallet = this.deriveWalletFromSeed(seed, "spending");
 
     return {
       viewingKey: {
-        privateKey: wallet1.privateKey,
-        publicKey: wallet1.signingKey.publicKey,
+        privateKey: viewingWallet.privateKey,
+        publicKey: viewingWallet.signingKey.publicKey,
       },
       spendingKey: {
-        privateKey: wallet2.privateKey,
-        publicKey: wallet2.signingKey.publicKey,
+        privateKey: spendingWallet.privateKey,
+        publicKey: spendingWallet.signingKey.publicKey,
       },
     };
   }
 
   /**
-   * Generates and saves stealth keys (placeholder implementation)
+   * Generates and saves stealth keys (deterministic implementation)
    */
-  async generateAndSaveKeys(): Promise<StealthKeys> {
-    return this.getStealthKeys();
+  async generateAndSaveKeys(signature?: string): Promise<StealthKeys> {
+    return this.getStealthKeys(signature);
   }
 
   /**
@@ -313,6 +322,18 @@ export class Stealth {
   }
 
   /**
+   * Deriva un wallet deterministico da un seed
+   */
+  private deriveWalletFromSeed(seed: string, purpose: string): ethers.Wallet {
+    // Crea un hash deterministico dal seed e dal purpose
+    const combinedSeed = `${seed}_${purpose}_stealth_deterministic`;
+    const seedHash = ethers.keccak256(ethers.toUtf8Bytes(combinedSeed));
+
+    // Usa l'hash come chiave privata
+    return new ethers.Wallet(seedHash);
+  }
+
+  /**
    * Opens a stealth address by deriving the private key using Fluidkey method
    */
   async openStealthAddress(
@@ -442,6 +463,68 @@ export class Stealth {
       this.log("error", "Error verifying stealth address", error);
       return false;
     }
+  }
+
+  /**
+   * Generate stealth keys from any signature string (unified method)
+   * Converts string signature to FluidkeySignature format and uses generateKeysFromSignature
+   */
+  async generateStealthKeysFromStringSignature(
+    signature: string
+  ): Promise<StealthKeys> {
+    try {
+      // Convert string signature to FluidkeySignature format
+      const fluidkeySignature: FluidkeySignature =
+        this.convertStringToFluidkeySignature(signature);
+
+      // Use the existing Fluidkey method
+      const result = await this.generateKeysFromSignature(fluidkeySignature);
+
+      return {
+        viewingKey: {
+          privateKey: result.viewingPrivateKey,
+          publicKey: result.viewingPublicKey,
+        },
+        spendingKey: {
+          privateKey: result.spendingPrivateKey,
+          publicKey: result.spendingPublicKey,
+        },
+      };
+    } catch (error) {
+      this.log(
+        "error",
+        "Error generating keys from string signature, falling back to hash method:",
+        error
+      );
+      // Fallback to the hash-based method
+      return this.getStealthKeys(signature);
+    }
+  }
+
+  /**
+   * Convert a string signature to FluidkeySignature format
+   */
+  private convertStringToFluidkeySignature(
+    signature: string
+  ): FluidkeySignature {
+    // Remove 0x prefix if present
+    const cleanSignature = signature.startsWith("0x")
+      ? signature.slice(2)
+      : signature;
+
+    // Ensure we have at least 130 characters (65 bytes)
+    const paddedSignature = cleanSignature.padEnd(130, "0").slice(0, 130);
+
+    // Split into r, s, v components
+    const r = paddedSignature.slice(0, 64);
+    const s = paddedSignature.slice(64, 128);
+    const v = parseInt(paddedSignature.slice(128, 130), 16);
+
+    return {
+      r: "0x" + r,
+      s: "0x" + s,
+      v: v || 27, // Default to 27 if parsing fails
+    };
   }
 }
 

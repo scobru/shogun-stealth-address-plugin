@@ -313,6 +313,24 @@ export interface StealthPluginInterface extends BasePluginInterface {
    * @param force Se true, ignora il timestamp dell'ultima eliminazione
    */
   forceSyncNotifications(force?: boolean): Promise<void>;
+
+  /**
+   * Get existing stealth keys for the current user using SEA signature as seed
+   * @returns Promise<StealthKeys | null> - null if no keys exist
+   */
+  getUserStealthKeysWithSEA(): Promise<StealthKeys | null>;
+
+  /**
+   * Create and save new stealth keys using SEA signature as seed
+   * @returns Promise<StealthKeys>
+   */
+  createUserStealthKeysWithSEA(): Promise<StealthKeys>;
+
+  /**
+   * Generate and save stealth keys using SEA signature as seed
+   * @returns Promise<StealthKeys>
+   */
+  generateAndSaveStealthKeysWithSEA(): Promise<StealthKeys>;
 }
 
 /**
