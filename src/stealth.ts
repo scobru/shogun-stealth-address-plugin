@@ -132,7 +132,7 @@ export class Stealth {
   async getStealthKeys(signature?: string): Promise<StealthKeys> {
     // Se viene fornita una firma, usa il metodo unificato con Fluidkey
     if (signature && signature !== "default_seed") {
-      return this.generateStealthKeysFromStringSignature(signature);
+      return this.generateStealthKeysFromStringSignature(signature, true);
     }
 
     // Se non viene fornita una firma, usa un seed di default
@@ -171,11 +171,99 @@ export class Stealth {
     spendingPublicKey: string;
   }> {
     try {
-      const signatureString = `${signature.r}${signature.s}${signature.v.toString(16).padStart(2, "0")}`;
-      const result = generateKeysFromSignature(`0x${signatureString}`);
+      this.log("debug", "Converting FluidkeySignature to string format", {
+        r: signature.r,
+        s: signature.s,
+        v: signature.v,
+      });
 
-      const viewingWallet = new ethers.Wallet(result.viewingPrivateKey);
-      const spendingWallet = new ethers.Wallet(result.spendingPrivateKey);
+      // Validate signature components
+      if (!signature.r || !signature.s || signature.v === undefined) {
+        throw new Error("Invalid signature: missing r, s, or v components");
+      }
+
+      // Validate signature format
+      if (
+        typeof signature.r !== "string" ||
+        typeof signature.s !== "string" ||
+        typeof signature.v !== "number"
+      ) {
+        throw new Error(
+          "Invalid signature: r and s must be strings, v must be a number"
+        );
+      }
+
+      // Rimuovi i prefissi 0x da r e s prima della concatenazione
+      const r = signature.r.startsWith("0x")
+        ? signature.r.slice(2)
+        : signature.r;
+      const s = signature.s.startsWith("0x")
+        ? signature.s.slice(2)
+        : signature.s;
+      const v = signature.v.toString(16).padStart(2, "0");
+
+      // Validate hex strings
+      if (!/^[0-9a-fA-F]+$/.test(r) || !/^[0-9a-fA-F]+$/.test(s)) {
+        throw new Error("Invalid signature: r and s must be valid hex strings");
+      }
+
+      const signatureString = `${r}${s}${v}`;
+      const finalSignature = `0x${signatureString}`;
+
+      this.log("debug", "Generated signature string", {
+        r: r,
+        s: s,
+        v: v,
+        signatureString: signatureString,
+        finalSignature: finalSignature,
+        length: finalSignature.length,
+      });
+
+      // Validate final signature length
+      if (finalSignature.length !== 132) {
+        // 0x + 130 hex chars
+        throw new Error(
+          `Invalid signature length: expected 132, got ${finalSignature.length}`
+        );
+      }
+
+      let result;
+      try {
+        result = generateKeysFromSignature(finalSignature as `0x${string}`);
+      } catch (fluidkeyError) {
+        this.log("error", "Fluidkey generateKeysFromSignature failed", {
+          error: fluidkeyError,
+          signature: finalSignature,
+        });
+        throw new Error(
+          `Fluidkey error: ${fluidkeyError instanceof Error ? fluidkeyError.message : String(fluidkeyError)}`
+        );
+      }
+
+      // Validate result
+      if (!result || !result.viewingPrivateKey || !result.spendingPrivateKey) {
+        throw new Error(
+          "Fluidkey returned invalid result: missing private keys"
+        );
+      }
+
+      let viewingWallet, spendingWallet;
+      try {
+        viewingWallet = new ethers.Wallet(result.viewingPrivateKey);
+        spendingWallet = new ethers.Wallet(result.spendingPrivateKey);
+      } catch (walletError) {
+        this.log("error", "Failed to create wallets from private keys", {
+          error: walletError,
+          viewingPrivateKey: result.viewingPrivateKey?.substring(0, 10) + "...",
+          spendingPrivateKey:
+            result.spendingPrivateKey?.substring(0, 10) + "...",
+        });
+        throw new Error(
+          `Wallet creation failed: ${walletError instanceof Error ? walletError.message : String(walletError)}`
+        );
+      }
+
+      this.log("debug", "Successfully generated keys from signature");
 
       return {
         viewingPrivateKey: result.viewingPrivateKey,
@@ -184,8 +272,19 @@ export class Stealth {
         spendingPublicKey: spendingWallet.signingKey.publicKey,
       };
     } catch (error) {
-      this.log("error", "Error generating keys from signature", error);
-      throw error;
+      this.log("error", "Error generating keys from signature", {
+        error: error,
+        signature: signature,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      });
+
+      // Return a more descriptive error
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Failed to generate keys from signature: ${errorMessage}`
+      );
     }
   }
 
@@ -470,7 +569,8 @@ export class Stealth {
    * Converts string signature to FluidkeySignature format and uses generateKeysFromSignature
    */
   async generateStealthKeysFromStringSignature(
-    signature: string
+    signature: string,
+    isFallback: boolean = false
   ): Promise<StealthKeys> {
     try {
       // Convert string signature to FluidkeySignature format
@@ -496,7 +596,30 @@ export class Stealth {
         "Error generating keys from string signature, falling back to hash method:",
         error
       );
-      // Fallback to the hash-based method
+
+      // Prevent infinite recursion - if this is already a fallback, use direct hash method
+      if (isFallback) {
+        this.log(
+          "warn",
+          "Preventing infinite recursion, using direct hash method"
+        );
+        const seed = signature || "default_seed";
+        const viewingWallet = this.deriveWalletFromSeed(seed, "viewing");
+        const spendingWallet = this.deriveWalletFromSeed(seed, "spending");
+
+        return {
+          viewingKey: {
+            privateKey: viewingWallet.privateKey,
+            publicKey: viewingWallet.signingKey.publicKey,
+          },
+          spendingKey: {
+            privateKey: spendingWallet.privateKey,
+            publicKey: spendingWallet.signingKey.publicKey,
+          },
+        };
+      }
+
+      // First fallback - use getStealthKeys with recursion prevention
       return this.getStealthKeys(signature);
     }
   }
@@ -507,24 +630,108 @@ export class Stealth {
   private convertStringToFluidkeySignature(
     signature: string
   ): FluidkeySignature {
-    // Remove 0x prefix if present
-    const cleanSignature = signature.startsWith("0x")
-      ? signature.slice(2)
-      : signature;
+    try {
+      this.log("debug", "Converting string signature to FluidkeySignature", {
+        originalSignature: signature,
+        length: signature.length,
+      });
 
-    // Ensure we have at least 130 characters (65 bytes)
-    const paddedSignature = cleanSignature.padEnd(130, "0").slice(0, 130);
+      // Validate input
+      if (!signature || typeof signature !== "string") {
+        throw new Error("Invalid signature: must be a non-empty string");
+      }
 
-    // Split into r, s, v components
-    const r = paddedSignature.slice(0, 64);
-    const s = paddedSignature.slice(64, 128);
-    const v = parseInt(paddedSignature.slice(128, 130), 16);
+      // Remove 0x prefix if present
+      const cleanSignature = signature.startsWith("0x")
+        ? signature.slice(2)
+        : signature;
 
-    return {
-      r: "0x" + r,
-      s: "0x" + s,
-      v: v || 27, // Default to 27 if parsing fails
-    };
+      // Check if we have enough characters for a valid signature
+      if (cleanSignature.length < 128) {
+        this.log("warn", "Signature too short, using hash-based fallback", {
+          cleanSignatureLength: cleanSignature.length,
+          expectedMinLength: 128,
+        });
+        throw new Error(
+          `Signature too short for standard ECDSA format: ${cleanSignature.length} chars, need at least 128`
+        );
+      }
+
+      // Validate hex format
+      if (!/^[0-9a-fA-F]+$/.test(cleanSignature)) {
+        throw new Error(
+          "Invalid signature: must contain only hexadecimal characters"
+        );
+      }
+
+      // Ensure we have at least 130 characters (65 bytes)
+      const paddedSignature = cleanSignature.padEnd(130, "0").slice(0, 130);
+
+      // Split into r, s, v components
+      const r = paddedSignature.slice(0, 64);
+      const s = paddedSignature.slice(64, 128);
+      const vHex = paddedSignature.slice(128, 130);
+
+      // Validate v component
+      const v = parseInt(vHex, 16);
+      if (isNaN(v) || v < 0 || v > 255) {
+        throw new Error(`Invalid v component: ${vHex} (must be 00-FF in hex)`);
+      }
+
+      const result = {
+        r: "0x" + r,
+        s: "0x" + s,
+        v: v || 27, // Default to 27 if parsing fails
+      };
+
+      this.log("debug", "Converted signature successfully", {
+        r: result.r,
+        s: result.s,
+        v: result.v,
+        paddedSignature: paddedSignature,
+      });
+
+      return result;
+    } catch (error) {
+      this.log(
+        "error",
+        "Error converting string signature to FluidkeySignature",
+        {
+          error: error,
+          signature: signature,
+          errorMessage: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+        }
+      );
+
+      // Fallback: create a valid signature from the hash of the original string
+      try {
+        const fallbackHash = ethers.keccak256(ethers.toUtf8Bytes(signature));
+        const fallbackR = fallbackHash.slice(2, 66);
+        const fallbackS = fallbackHash.slice(66, 130);
+        const fallbackV = 27;
+
+        this.log("warn", "Using fallback signature conversion", {
+          fallbackR: fallbackR,
+          fallbackS: fallbackS,
+          fallbackV: fallbackV,
+        });
+
+        return {
+          r: "0x" + fallbackR,
+          s: "0x" + fallbackS,
+          v: fallbackV,
+        };
+      } catch (fallbackError) {
+        this.log("error", "Fallback signature conversion also failed", {
+          error: fallbackError,
+          originalError: error,
+        });
+        throw new Error(
+          `Signature conversion failed: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
   }
 }
 
