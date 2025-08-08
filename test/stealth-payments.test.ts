@@ -1,39 +1,27 @@
 import { StealthPlugin } from "../src/stealthPlugin";
 import { ethers } from "ethers";
 
-// Mock Gun instance
+// A fluent mock for GunDB that allows chained calls.
 const mockGun = {
-  user: () => ({
-    is: { pub: "test-user-pub" },
-    get: (path: string) => ({
-      put: (data: any, callback: any) => {
-        if (callback) callback({ err: null });
-        return mockGun;
-      },
-      once: (callback: any) => {
-        callback(null);
-        return mockGun;
-      },
-      on: (callback: any) => {
-        return mockGun;
-      },
-    }),
-  }),
-  get: (path: string) => ({
-    get: (pub: string) => ({
-      put: (data: any, callback: any) => {
-        if (callback) callback({ err: null });
-        return mockGun;
-      },
-      once: (callback: any) => {
-        callback(null);
-        return mockGun;
-      },
-      on: (callback: any) => {
-        return mockGun;
-      },
-    }),
-  }),
+  user: () => mockGun,
+  get: (path: string) => mockGun,
+  put: (data: any, callback?: (ack: { err: Error | null }) => void) => {
+    if (callback) {
+      callback({ err: null });
+    }
+    return mockGun;
+  },
+  once: (callback: (data: any) => void) => {
+    // Simulate finding nothing by returning null
+    callback(null);
+    return mockGun;
+  },
+  on: (callback: (data: any, key: string) => void) => {
+    // Do nothing for 'on' subscriptions in this mock
+    return mockGun;
+  },
+  // Needed for the user() call chain
+  is: { pub: "test-user-pub" },
 };
 
 // Mock provider and signer
@@ -65,8 +53,9 @@ describe("StealthPlugin Payment Tests", () => {
   test("should get user stealth keys", async () => {
     const keys = await plugin.getUserStealthKeys();
     expect(keys).toBeDefined();
-    expect(keys.viewingKey).toBeDefined();
-    expect(keys.spendingKey).toBeDefined();
+    expect(keys).not.toBeNull();
+    expect(keys!.viewingKey).toBeDefined();
+    expect(keys!.spendingKey).toBeDefined();
   });
 
   test("should generate stealth address", async () => {
@@ -109,11 +98,13 @@ describe("Stealth Payment Flow", () => {
 
     expect(senderKeys).toBeDefined();
     expect(recipientKeys).toBeDefined();
+    expect(recipientKeys).not.toBeNull();
+
 
     // 2. Generate stealth address
     const stealthResult = await plugin.generateStealthAddress(
-      recipientKeys.viewingKey.publicKey,
-      recipientKeys.spendingKey.publicKey
+      recipientKeys!.viewingKey.publicKey,
+      recipientKeys!.spendingKey.publicKey
     );
 
     expect(stealthResult.stealthAddress).toBeDefined();
@@ -123,11 +114,13 @@ describe("Stealth Payment Flow", () => {
     const openedWallet = await plugin.openStealthAddress(
       stealthResult.stealthAddress,
       stealthResult.ephemeralPublicKey,
-      recipientKeys.viewingKey.privateKey,
-      recipientKeys.spendingKey.privateKey
+      recipientKeys!.viewingKey.privateKey,
+      recipientKeys!.spendingKey.privateKey
     );
 
     expect(openedWallet).toBeDefined();
-    expect(openedWallet.address).toBe(stealthResult.stealthAddress);
+    expect(openedWallet.address.toLowerCase()).toBe(
+      stealthResult.stealthAddress.toLowerCase()
+    );
   });
 });
