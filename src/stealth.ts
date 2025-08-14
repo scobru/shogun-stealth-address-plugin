@@ -310,8 +310,9 @@ export class Stealth {
             ? viewingPrivateKey.slice(2)
             : viewingPrivateKey;
           const hdKey = HDKey.fromMasterSeed(Buffer.from(cleanPriv, "hex"));
+
           const result = generateEphemeralPrivateKey({
-            viewingPrivateKeyNode: hdKey,
+            viewingPrivateKeyNode: hdKey as any,
             nonce: 0n,
             chainId: 1,
             coinType: 60,
