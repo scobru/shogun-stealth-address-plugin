@@ -1,6 +1,6 @@
 {
   "name": "shogun-stealth-address",
-  "version": "1.5.17",
+  "version": "1.6.0",
   "description": "Stealth address functionality for Shogun SDK",
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",
@@ -46,6 +46,8 @@
     "os-browserify": "^0.3.0",
     "path-browserify": "^1.0.1",
     "process": "^0.11.10",
+    "shogun-bip44": "^1.6.0",
+    "shogun-core": "^1.7.1",
     "stream-browserify": "^3.0.0"
   },
   "peerDependencies": {
