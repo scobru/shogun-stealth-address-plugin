@@ -1686,37 +1686,35 @@ export class StealthPlugin
           stealthKeys.spendingKey.privateKey
         );
 
-        // Connetti il wallet al provider
-        const connectedWallet = stealthWallet.connect(this.provider!);
-
         // Ottieni il balance dello stealth address
         const balance = await this.provider!.getBalance(stealthAddress);
         if (balance === 0n) {
           throw new Error("No ETH balance in stealth address");
         }
 
-        // Calcola il gas fee con un margine di sicurezza del 50%
+        // Calcola il gas fee per la transazione
         const feeData = await this.provider!.getFeeData();
         const gasPrice = feeData.gasPrice || 20000000000n; // Fallback a 20 gwei
         const gasLimit = 21000n; // Transfer standard
-        const baseGasFee = gasLimit * gasPrice;
-        const gasFee = (baseGasFee * 150n) / 100n; // Aggiungi 50% di margine
+        const estimatedGasFee = gasLimit * gasPrice;
 
-        // Verifica preliminare se il balance è sufficiente
-        if (balance <= gasFee) {
-          const minRequired = gasFee + 1n; // Almeno 1 wei in più
+        // Calcola l'importo massimo che può essere inviato (balance - gas fee)
+        const maxTransferAmount = balance - estimatedGasFee;
+
+        // Verifica se c'è abbastanza ETH per fare il transfer
+        if (maxTransferAmount <= 0n) {
           throw new Error(
-            `Insufficient balance for withdrawal. Current balance: ${ethers.formatEther(balance)} ETH. Required (including 50% gas margin): ${ethers.formatEther(minRequired)} ETH. Please add more ETH to the stealth address or wait for lower gas prices.`
+            `Insufficient balance in stealth address for withdrawal. Current balance: ${ethers.formatEther(balance)} ETH. Estimated gas cost: ${ethers.formatEther(estimatedGasFee)} ETH. Available for transfer: ${ethers.formatEther(maxTransferAmount)} ETH. The stealth address needs more ETH to cover gas costs.`
           );
         }
 
-        // Calcola l'importo da inviare (balance - gas fee)
-        const amountToSend = balance - gasFee;
+        // Connetti il wallet al provider
+        const connectedWallet = stealthWallet.connect(this.provider!);
 
-        // Invia la transazione
+        // Invia la transazione con l'importo massimo disponibile
         const tx = await connectedWallet.sendTransaction({
           to: acceptor,
-          value: amountToSend,
+          value: maxTransferAmount,
           gasLimit: gasLimit,
         });
 
@@ -1724,8 +1722,10 @@ export class StealthPlugin
           stealthAddress,
           acceptor,
           txHash: tx.hash,
-          amount: ethers.formatEther(amountToSend),
+          amount: ethers.formatEther(maxTransferAmount),
           gasUsed: gasLimit.toString(),
+          totalBalance: ethers.formatEther(balance),
+          gasCost: ethers.formatEther(estimatedGasFee),
         });
 
         return { txHash: tx.hash };
