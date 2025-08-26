@@ -1696,39 +1696,110 @@ export class StealthPlugin
         const feeData = await this.provider!.getFeeData();
         const gasPrice = feeData.gasPrice || 20000000000n; // Fallback a 20 gwei
         const gasLimit = 21000n; // Transfer standard
-        const estimatedGasFee = gasLimit * gasPrice;
-
-        // Calcola l'importo massimo che può essere inviato (balance - gas fee)
-        const maxTransferAmount = balance - estimatedGasFee;
-
-        // Verifica se c'è abbastanza ETH per fare il transfer
-        if (maxTransferAmount <= 0n) {
-          throw new Error(
-            `Insufficient balance in stealth address for withdrawal. Current balance: ${ethers.formatEther(balance)} ETH. Estimated gas cost: ${ethers.formatEther(estimatedGasFee)} ETH. Available for transfer: ${ethers.formatEther(maxTransferAmount)} ETH. The stealth address needs more ETH to cover gas costs.`
-          );
-        }
 
         // Connetti il wallet al provider
         const connectedWallet = stealthWallet.connect(this.provider!);
 
-        // Invia la transazione con l'importo massimo disponibile
-        const tx = await connectedWallet.sendTransaction({
-          to: acceptor,
-          value: maxTransferAmount,
-          gasLimit: gasLimit,
-        });
+        // Prova a stimare il gas più accuratamente
+        let estimatedGasLimit = gasLimit;
+        try {
+          const gasEstimate = await this.provider!.estimateGas({
+            from: stealthAddress,
+            to: acceptor,
+            value: balance - 1000000n, // Lascia 1 wei per il gas
+          });
+          estimatedGasLimit = gasEstimate;
+        } catch (error) {
+          this.log(
+            "warn",
+            "Could not estimate gas, using default limit",
+            error
+          );
+        }
 
-        this.log("info", "ETH stealth payment withdrawn successfully", {
-          stealthAddress,
-          acceptor,
-          txHash: tx.hash,
-          amount: ethers.formatEther(maxTransferAmount),
-          gasUsed: gasLimit.toString(),
-          totalBalance: ethers.formatEther(balance),
-          gasCost: ethers.formatEther(estimatedGasFee),
-        });
+        const baseGasFee = estimatedGasLimit * gasPrice;
 
-        return { txHash: tx.hash };
+        // SEMPRE inizia con importi piccoli e sicuri
+        const smallAmounts = [
+          1000000000000000n, // 0.001 ETH
+          500000000000000n, // 0.0005 ETH
+          100000000000000n, // 0.0001 ETH
+          50000000000000n, // 0.00005 ETH
+          10000000000000n, // 0.00001 ETH
+          5000000000000n, // 0.000005 ETH
+          1000000000000n, // 0.000001 ETH
+        ];
+
+        // Prova prima con importi piccoli e sicuri
+        for (const smallAmount of smallAmounts) {
+          if (smallAmount < balance) {
+            try {
+              this.log(
+                "info",
+                `Trying to withdraw ${ethers.formatEther(smallAmount)} ETH (small amount approach)`
+              );
+
+              const tx = await connectedWallet.sendTransaction({
+                to: acceptor,
+                value: smallAmount,
+                gasLimit: estimatedGasLimit,
+                gasPrice: gasPrice,
+              });
+
+              await tx.wait();
+              this.log(
+                "info",
+                `Successfully withdrew ${ethers.formatEther(smallAmount)} ETH with small amount approach`
+              );
+              return { txHash: tx.hash };
+            } catch (txError) {
+              this.log(
+                "warn",
+                `Transaction failed with small amount ${ethers.formatEther(smallAmount)} ETH, trying next`,
+                txError
+              );
+              continue;
+            }
+          }
+        }
+
+        // Se tutti gli importi piccoli falliscono, prova con l'importo massimo calcolato
+        const maxTransferAmount = balance - baseGasFee;
+        if (maxTransferAmount > 0n) {
+          try {
+            this.log(
+              "info",
+              `Trying to withdraw ${ethers.formatEther(maxTransferAmount)} ETH (calculated max amount)`
+            );
+
+            const tx = await connectedWallet.sendTransaction({
+              to: acceptor,
+              value: maxTransferAmount,
+              gasLimit: estimatedGasLimit,
+              gasPrice: gasPrice,
+            });
+
+            await tx.wait();
+            this.log("info", "ETH stealth payment withdrawn successfully", {
+              stealthAddress,
+              acceptor,
+              txHash: tx.hash,
+              amount: ethers.formatEther(maxTransferAmount),
+              gasUsed: estimatedGasLimit.toString(),
+              totalBalance: ethers.formatEther(balance),
+              gasCost: ethers.formatEther(baseGasFee),
+            });
+
+            return { txHash: tx.hash };
+          } catch (txError) {
+            this.log("warn", "Calculated max amount failed", txError);
+          }
+        }
+
+        // Se tutti i tentativi falliscono, lancia un errore
+        throw new Error(
+          `Insufficient balance in stealth address for withdrawal. Current balance: ${ethers.formatEther(balance)} ETH. Estimated gas cost: ${ethers.formatEther(baseGasFee)} ETH. The system tried multiple small amounts but all failed. The stealth address needs more ETH to cover gas costs.`
+        );
       } else {
         // Per i token ERC-20, usa il contratto PaymentForwarder
         if (!this.paymentForwarderContract) {
@@ -3263,6 +3334,351 @@ export class StealthPlugin
         error
       );
       return null;
+    }
+  }
+
+  /**
+   * Calculate the maximum amount that can be withdrawn from a stealth address
+   * @param stealthAddress The stealth address to check
+   * @param ephemeralPublicKey The ephemeral public key
+   * @returns Promise with the maximum withdrawable amount and gas cost
+   */
+  async calculateMaxWithdrawableAmount(
+    stealthAddress: string,
+    ephemeralPublicKey?: string
+  ): Promise<{
+    maxAmount: string;
+    gasCost: string;
+    totalBalance: string;
+    canWithdraw: boolean;
+  }> {
+    this.assertFullyInitialized();
+
+    try {
+      // Ottieni le chiavi stealth dell'utente
+      const stealthKeys = await this.getUserStealthKeys();
+      if (!stealthKeys) {
+        throw new Error("Stealth keys not found");
+      }
+
+      // Se non è fornito l'ephemeral public key, cerca il pagamento
+      let ephemeralKey = ephemeralPublicKey;
+      if (!ephemeralKey) {
+        const payment = await this.getPayment(stealthAddress, Date.now());
+        if (!payment) {
+          throw new Error("Payment not found for stealth address");
+        }
+        ephemeralKey = payment.ephemeralPublicKey;
+      }
+
+      // Ottieni il balance dello stealth address
+      const balance = await this.provider!.getBalance(stealthAddress);
+      if (balance === 0n) {
+        return {
+          maxAmount: "0",
+          gasCost: "0",
+          totalBalance: "0",
+          canWithdraw: false,
+        };
+      }
+
+      // Calcola il gas fee
+      const feeData = await this.provider!.getFeeData();
+      const gasPrice = feeData.gasPrice || 20000000000n;
+      const gasLimit = 21000n;
+
+      // Prova a stimare il gas più accuratamente
+      let estimatedGasLimit = gasLimit;
+      try {
+        const gasEstimate = await this.provider!.estimateGas({
+          from: stealthAddress,
+          to: "0x0000000000000000000000000000000000000000", // Dummy address
+          value: balance - 1000000n,
+        });
+        estimatedGasLimit = gasEstimate;
+      } catch (error) {
+        this.log("warn", "Could not estimate gas, using default limit", error);
+      }
+
+      const baseGasFee = estimatedGasLimit * gasPrice;
+
+      // Calcola l'importo massimo che può essere inviato (balance - gas fee)
+      const maxTransferAmount = balance - baseGasFee;
+
+      // Se non c'è abbastanza ETH per fare il transfer, prova con margini progressivamente più piccoli
+      let actualMaxAmount = maxTransferAmount;
+      if (maxTransferAmount <= 0n) {
+        // Prova con margini progressivamente più piccoli
+        const margins = [110n, 105n, 102n, 101n]; // 10%, 5%, 2%, 1%
+
+        for (const margin of margins) {
+          const smallerMargin = (baseGasFee * margin) / 100n;
+          const smallerTransferAmount = balance - smallerMargin;
+
+          if (smallerTransferAmount > 0n) {
+            actualMaxAmount = smallerTransferAmount;
+            break;
+          }
+        }
+      }
+
+      return {
+        maxAmount: ethers.formatEther(
+          actualMaxAmount > 0n ? actualMaxAmount : 0n
+        ),
+        gasCost: ethers.formatEther(baseGasFee),
+        totalBalance: ethers.formatEther(balance),
+        canWithdraw: actualMaxAmount > 0n,
+      };
+    } catch (error) {
+      this.log("error", "Error calculating max withdrawable amount", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Enhanced fee calculation system inspired by Umbra protocol
+   * @param token Token address or ETH_TOKEN_PLACEHOLDER for ETH
+   * @param amount Amount to send
+   * @returns Promise with fee breakdown
+   */
+  async calculateFees(
+    token: string,
+    amount: string
+  ): Promise<{
+    toll: string;
+    estimatedGas: string;
+    totalCost: string;
+    breakdown: {
+      baseAmount: string;
+      toll: string;
+      gasEstimate: string;
+      gasPrice: string;
+      totalGasCost: string;
+    };
+  }> {
+    this.assertFullyInitialized();
+
+    if (!this.paymentForwarderContract) {
+      throw new Error("Payment forwarder contract not initialized");
+    }
+
+    if (!this.provider) {
+      throw new Error("Provider not initialized");
+    }
+
+    try {
+      // Get toll from contract
+      const toll = await this.paymentForwarderContract.toll();
+
+      // Get current gas price
+      const feeData = await this.provider.getFeeData();
+      const gasPrice = feeData.gasPrice || 20000000000n; // Fallback to 20 gwei
+
+      // Estimate gas for the transaction
+      let estimatedGas = 21000n; // Default for ETH transfer
+
+      if (token === ETH_TOKEN_PLACEHOLDER) {
+        // For ETH, estimate gas for stealth address withdrawal
+        try {
+          const gasEstimate = await this.provider.estimateGas({
+            to: this.paymentForwarderContract.target,
+            value: toll,
+          });
+          estimatedGas = gasEstimate;
+        } catch (error) {
+          this.log("warn", "Could not estimate gas, using default", error);
+        }
+      } else {
+        // For ERC-20 tokens, estimate gas for token transfer
+        try {
+          const gasEstimate =
+            await this.paymentForwarderContract.withdrawToken.estimateGas(
+              "0x0000000000000000000000000000000000000000", // Dummy address
+              token
+            );
+          estimatedGas = gasEstimate;
+        } catch (error) {
+          this.log(
+            "warn",
+            "Could not estimate gas for token, using default",
+            error
+          );
+        }
+      }
+
+      // Calculate total gas cost
+      const totalGasCost = estimatedGas * gasPrice;
+
+      // Calculate total cost
+      const totalCost = BigInt(amount) + toll + totalGasCost;
+
+      return {
+        toll: toll.toString(),
+        estimatedGas: estimatedGas.toString(),
+        totalCost: totalCost.toString(),
+        breakdown: {
+          baseAmount: amount,
+          toll: toll.toString(),
+          gasEstimate: estimatedGas.toString(),
+          gasPrice: gasPrice.toString(),
+          totalGasCost: totalGasCost.toString(),
+        },
+      };
+    } catch (error) {
+      this.log("error", "Error calculating fees", error);
+      throw new Error(`Failed to calculate fees: ${error}`);
+    }
+  }
+
+  /**
+   * Enhanced ETH withdrawal with Umbra-inspired retry logic
+   * @param stealthAddress The stealth address containing the payment
+   * @param acceptor The address to receive the withdrawn funds
+   * @param ephemeralPublicKey Optional ephemeral public key for ETH withdrawals
+   * @returns Promise<{txHash: string}>
+   */
+  async withdrawStealthPaymentEnhanced(
+    stealthAddress: string,
+    acceptor: string,
+    ephemeralPublicKey?: string
+  ): Promise<{ txHash: string }> {
+    this.assertFullyInitialized();
+
+    try {
+      this.log("info", "Enhanced ETH withdrawal from stealth address", {
+        stealthAddress,
+        acceptor,
+      });
+
+      // Get stealth keys
+      const stealthKeys = await this.getUserStealthKeys();
+      if (!stealthKeys) {
+        throw new Error("Stealth keys not found. Cannot open stealth address.");
+      }
+
+      // Get ephemeral key if not provided
+      let ephemeralKey = ephemeralPublicKey;
+      if (!ephemeralKey) {
+        const payment = await this.getPayment(stealthAddress, Date.now());
+        if (!payment) {
+          throw new Error(
+            "Payment not found for stealth address and ephemeral public key not provided"
+          );
+        }
+        ephemeralKey = payment.ephemeralPublicKey;
+      }
+
+      // Open stealth address
+      const stealthWallet = await this.openStealthAddress(
+        stealthAddress,
+        ephemeralKey,
+        stealthKeys.viewingKey.privateKey,
+        stealthKeys.spendingKey.privateKey
+      );
+
+      // Get balance
+      const balance = await this.provider!.getBalance(stealthAddress);
+      if (balance === 0n) {
+        throw new Error("No ETH balance in stealth address");
+      }
+
+      // Connect wallet to provider
+      const connectedWallet = stealthWallet.connect(this.provider!);
+
+      // Enhanced gas estimation with retry logic (inspired by Umbra)
+      const maxRetries = 20;
+      let lastError: any;
+
+      for (let retryCount = 0; retryCount < maxRetries; retryCount++) {
+        try {
+          // Get current gas price
+          const feeData = await this.provider!.getFeeData();
+          const gasPrice = feeData.gasPrice || 20000000000n;
+
+          // Estimate gas with margin for L2 networks
+          let estimatedGas = 21000n;
+          try {
+            const gasEstimate = await this.provider!.estimateGas({
+              from: stealthAddress,
+              to: acceptor,
+              value: balance - 1000000n, // Leave 1 wei for gas
+            });
+            estimatedGas = gasEstimate;
+          } catch (error) {
+            this.log("warn", "Could not estimate gas, using default", error);
+          }
+
+          // Calculate gas cost
+          const gasCost = estimatedGas * gasPrice;
+
+          // For L2 networks (Optimism, Base), add margin for variable L1 gas costs
+          let adjustedValue = balance - gasCost;
+          const chainId = (await this.provider!.getNetwork()).chainId;
+
+          if (chainId === 10n || chainId === 8453n) {
+            // Optimism or Base
+            const margin = (gasCost * BigInt(Math.min(retryCount, 20))) / 100n;
+            adjustedValue = adjustedValue - margin;
+          }
+
+          // Ensure we have enough for gas
+          if (adjustedValue <= 0n) {
+            throw new Error("Insufficient balance for gas costs");
+          }
+
+          // Try the transaction
+          const tx = await connectedWallet.sendTransaction({
+            to: acceptor,
+            value: adjustedValue,
+            gasLimit: estimatedGas,
+            gasPrice: gasPrice,
+          });
+
+          await tx.wait();
+
+          this.log(
+            "info",
+            "Enhanced ETH stealth payment withdrawn successfully",
+            {
+              stealthAddress,
+              acceptor,
+              txHash: tx.hash,
+              amount: ethers.formatEther(adjustedValue),
+              gasUsed: estimatedGas.toString(),
+              totalBalance: ethers.formatEther(balance),
+              gasCost: ethers.formatEther(gasCost),
+              retryCount,
+            }
+          );
+
+          return { txHash: tx.hash };
+        } catch (error: any) {
+          lastError = error;
+
+          // Only retry on insufficient funds errors
+          if (!error.message?.includes("insufficient funds")) {
+            throw error;
+          }
+
+          this.log(
+            "warn",
+            `Withdrawal attempt ${retryCount + 1} failed, retrying...`,
+            error
+          );
+
+          // Small delay before retry
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+      }
+
+      // If we get here, all retries failed
+      throw new Error(
+        `Failed to withdraw after ${maxRetries} attempts. Last error: ${lastError?.message}`
+      );
+    } catch (error) {
+      this.log("error", "Error in enhanced ETH withdrawal", error);
+      throw error;
     }
   }
 }

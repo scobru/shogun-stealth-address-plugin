@@ -7,6 +7,11 @@ import { Wallet } from "ethers";
  */
 
 /**
+ * Placeholder for ETH token in stealth operations
+ */
+export const ETH_TOKEN_PLACEHOLDER = "0x0000000000000000000000000000000000000000";
+
+/**
  * Fluidkey compatible key pair interface
  */
 export interface EphemeralKeyPair {
@@ -331,6 +336,41 @@ export interface StealthPluginInterface extends BasePluginInterface {
    * @returns Promise<StealthKeys>
    */
   generateAndSaveStealthKeysWithSEA(): Promise<StealthKeys>;
+
+  /**
+   * Enhanced fee calculation system inspired by Umbra protocol
+   * @param token Token address or ETH_TOKEN_PLACEHOLDER for ETH
+   * @param amount Amount to send
+   * @returns Promise with fee breakdown
+   */
+  calculateFees(
+    token: string,
+    amount: string
+  ): Promise<{
+    toll: string;
+    estimatedGas: string;
+    totalCost: string;
+    breakdown: {
+      baseAmount: string;
+      toll: string;
+      gasEstimate: string;
+      gasPrice: string;
+      totalGasCost: string;
+    };
+  }>;
+
+  /**
+   * Enhanced ETH withdrawal with Umbra-inspired retry logic
+   * @param stealthAddress The stealth address containing the payment
+   * @param acceptor The address to receive the withdrawn funds
+   * @param ephemeralPublicKey Optional ephemeral public key for ETH withdrawals
+   * @returns Promise<{txHash: string}>
+   */
+  withdrawStealthPaymentEnhanced(
+    stealthAddress: string,
+    acceptor: string,
+    ephemeralPublicKey?: string
+  ): Promise<{ txHash: string }>;
 }
 
 /**

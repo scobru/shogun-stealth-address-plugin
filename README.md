@@ -36,6 +36,57 @@ async generateStealthKeysFromStringSignature(signature: string): Promise<Stealth
 4. **Fallback**: Se Fluidkey fallisce, usa metodo hash-based
 5. **Output**: StealthKeys consistenti
 
+## 💰 Sistema di Calcolo Fee Avanzato (Ispirato a Umbra Protocol)
+
+### **Caratteristiche Principali**
+
+- ✅ **Calcolo Fee Precise**: Stima accurata di gas e toll
+- ✅ **Retry Logic Intelligente**: Sistema di retry ispirato a Umbra per L2 networks
+- ✅ **Ottimizzazione L2**: Margini di sicurezza per costi L1 variabili
+- ✅ **Breakdown Dettagliato**: Analisi completa dei costi
+
+### **Nuove Funzioni**
+
+#### **1. Calcolo Fee Avanzato**
+
+```typescript
+// Calcola fee complete per qualsiasi token
+const fees = await stealthPlugin.calculateFees(
+  ETH_TOKEN_PLACEHOLDER, // o indirizzo token
+  ethers.parseEther("0.1").toString()
+);
+
+console.log("Fee Breakdown:", {
+  baseAmount: ethers.formatEther(fees.breakdown.baseAmount) + " ETH",
+  toll: ethers.formatEther(fees.breakdown.toll) + " ETH",
+  gasEstimate: fees.breakdown.gasEstimate,
+  gasPrice: ethers.formatGwei(fees.breakdown.gasPrice) + " gwei",
+  totalGasCost: ethers.formatEther(fees.breakdown.totalGasCost) + " ETH",
+  totalCost: ethers.formatEther(fees.totalCost) + " ETH",
+});
+```
+
+#### **2. Withdrawal ETH Avanzato**
+
+```typescript
+// Withdrawal con retry logic ispirato a Umbra
+const result = await stealthPlugin.withdrawStealthPaymentEnhanced(
+  stealthAddress,
+  recipientAddress,
+  ephemeralPublicKey // opzionale
+);
+
+console.log("Withdrawal successful:", result.txHash);
+```
+
+### **Vantaggi del Sistema Avanzato**
+
+1. **🎯 Precisione**: Stima accurata dei costi prima della transazione
+2. **🔄 Affidabilità**: Retry automatico per errori di gas insufficiente
+3. **⚡ Ottimizzazione L2**: Gestione intelligente dei costi L1 variabili
+4. **📊 Trasparenza**: Breakdown completo di tutti i costi
+5. **🛡️ Sicurezza**: Margini di sicurezza per evitare fallimenti
+
 ## 🚀 Metodi Disponibili
 
 ### **1. Metodi con Firma Wallet (Default)**
@@ -54,6 +105,20 @@ await stealthPlugin.generateAndSaveStealthKeys();
 await stealthPlugin.getUserStealthKeysWithSEA();
 await stealthPlugin.createUserStealthKeysWithSEA();
 await stealthPlugin.generateAndSaveStealthKeysWithSEA();
+```
+
+### **3. Nuovi Metodi di Calcolo Fee**
+
+```typescript
+// Calcolo fee avanzato
+await stealthPlugin.calculateFees(token, amount);
+
+// Withdrawal ETH con retry logic
+await stealthPlugin.withdrawStealthPaymentEnhanced(
+  stealthAddress,
+  recipient,
+  ephemeralKey
+);
 ```
 
 ## 🔄 Flusso di Sincronizzazione
@@ -79,21 +144,44 @@ Il sistema implementa una sincronizzazione automatica intelligente:
 - Ancora più sicuro perché usa le credenziali GunDB direttamente
 - Non dipende da wallet esterni
 
-## 📝 Esempio di Utilizzo
+## 📝 Esempio di Utilizzo Completo
 
 ```typescript
 // Inizializza il plugin
 const stealthPlugin = new StealthPlugin();
 await stealthPlugin.initialize(core);
 
-// Metodo 1: Usa firma wallet (default)
-const keys1 = await stealthPlugin.getUserStealthKeys();
+// 1. Genera chiavi stealth
+const keys = await stealthPlugin.getUserStealthKeysWithSEA();
 
-// Metodo 2: Usa firma SEA (più sicuro)
-const keys2 = await stealthPlugin.getUserStealthKeysWithSEA();
+// 2. Calcola fee per un pagamento
+const fees = await stealthPlugin.calculateFees(
+  ETH_TOKEN_PLACEHOLDER,
+  ethers.parseEther("0.1").toString()
+);
 
-// Entrambi i metodi restituiscono le stesse chiavi per lo stesso utente
-console.log(keys1.viewingKey.publicKey === keys2.viewingKey.publicKey); // true
+console.log("Costi stimati:", {
+  importo: ethers.formatEther(fees.breakdown.baseAmount) + " ETH",
+  toll: ethers.formatEther(fees.breakdown.toll) + " ETH",
+  gas: ethers.formatEther(fees.breakdown.totalGasCost) + " ETH",
+  totale: ethers.formatEther(fees.totalCost) + " ETH",
+});
+
+// 3. Invia pagamento stealth
+const payment = await stealthPlugin.sendStealthPayment(
+  recipientGunPub,
+  ethers.parseEther("0.1").toString(),
+  ETH_TOKEN_PLACEHOLDER,
+  "Pagamento stealth"
+);
+
+// 4. Withdrawal con sistema avanzato
+const withdrawal = await stealthPlugin.withdrawStealthPaymentEnhanced(
+  payment.stealthAddress,
+  recipientAddress
+);
+
+console.log("Pagamento completato:", withdrawal.txHash);
 ```
 
 ## 🔧 Configurazione
@@ -119,6 +207,9 @@ stealthPlugin.setProviderAndSigner(provider, signer);
 5. **🎛️ Flessibilità**: Due metodi di generazione (Wallet e SEA)
 6. **🧹 Codice Pulito**: DRY principle - nessuna duplicazione di codice
 7. **🔧 Manutenibilità**: Un solo punto di generazione delle chiavi
+8. **💰 Fee Avanzate**: Sistema di calcolo fee ispirato a Umbra Protocol
+9. **🔄 Retry Logic**: Gestione intelligente degli errori di gas
+10. **📊 Trasparenza**: Breakdown completo dei costi
 
 ## 🚨 Note Importanti
 
@@ -127,3 +218,5 @@ stealthPlugin.setProviderAndSigner(provider, signer);
 - Il fallback è gestito automaticamente se un metodo non è disponibile
 - Le chiavi private sono sempre mantenute sicure e non esposte
 - **Codice ottimizzato**: Tutti i metodi usano lo stesso algoritmo di base
+- **Sistema Fee Avanzato**: Calcolo preciso e retry logic per massima affidabilità
+- **Supporto L2**: Ottimizzazioni specifiche per reti Layer 2
